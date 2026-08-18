@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import os
 import smtplib
 import warnings
@@ -220,7 +221,12 @@ def edit_contract_dialog(row_data):
     default_start = raw_start.date() if pd.notna(raw_start) else None
 
     raw_exp = safe_parse_dt(row_data.get('Contract End Date (Expiry)', ''))
-    default_exp = raw_exp.date() if pd.notna(raw_exp) else None
+    
+    # If Expiration Date is empty but Start Date exists, default to Start Date + 1 Year - 1 Day
+    if pd.isna(raw_exp) and pd.notna(raw_start):
+        default_exp = (raw_start + pd.DateOffset(years=1) - pd.Timedelta(days=1)).date()
+    else:
+        default_exp = raw_exp.date() if pd.notna(raw_exp) else None
 
     with st.form(f"edit_form_{contract_id}"):
         c1, c2, c3 = st.columns(3)
@@ -240,11 +246,12 @@ def edit_contract_dialog(row_data):
 
         c_extra1, c_extra2, c_extra3 = st.columns(3)
         with c_extra1:
-            e_pack = st.text_input("Pack Size", value=str(row_data.get('pack size', '')))
+            current_year_val = str(row_data.get('Contract Execution Year', 'First year'))
+            e_year = st.text_input("Contract Execution Year / Status", value=current_year_val, help="e.g. Year 1, Year 2, Year 3, First year, 2nd year")
         with c_extra2:
-            e_class = st.text_input("General medicines/Specialised/Oncology", value=str(row_data.get('General medicines/Specialised/Oncology', '')))
+            e_pack = st.text_input("Pack Size", value=str(row_data.get('pack size', '')))
         with c_extra3:
-            e_inco = st.text_input("Incoterm", value=str(row_data.get('Incoterm', '')))
+            e_class = st.text_input("General medicines/Specialised/Oncology", value=str(row_data.get('General medicines/Specialised/Oncology', '')))
 
         st.markdown("### 📝 Title of the Contract (Rich-Text Editor)")
         val_title = str(row_data.get('Title of the contract', ''))
@@ -267,9 +274,9 @@ def edit_contract_dialog(row_data):
                 'Unit price': e_uprice,
                 'Currency': e_curr,
                 'Demandor (End user)': e_enduser,
+                'Contract Execution Year': e_year,
                 'pack size': e_pack,
                 'General medicines/Specialised/Oncology': e_class,
-                'Incoterm': e_inco,
                 'Title of the contract': e_title,
                 'Product Description': e_desc,
                 'CLEANING ACTION': e_clean,
@@ -303,7 +310,7 @@ tab_tracker, tab_emails, tab_import, tab_logs = st.tabs([
 with tab_tracker:
     s_col1, s_col2, s_col3 = st.columns([3, 1.2, 1.5])
     with s_col1:
-        search_query = st.text_input("🔍 Search Product Description, Code, Supplier, Framework Ref, or Title...", placeholder="e.g. Paracetamol, Needles, Hetero, 144/G/IRT...")
+        search_query = st.text_input("🔍 Search Description, Code, Supplier, Manufacturer, Ref #, Officer, Category, or Title...", placeholder="e.g. Paracetamol, Hetero, AUROLAB, 144/G/IRT, Cecile...")
     with s_col2:
         category_filter = st.selectbox("Filter Sheet / Category", ["All", "Medicines", "Consumables", "Laboratory", "IMPLANTS_"])
     with s_col3:
@@ -316,50 +323,84 @@ with tab_tracker:
             "⏳ Missing Expiry Date"
         ])
 
-    # Load Database Records
+    # Load Database Records (Cached & Fast)
     df = db.load_contracts(category_filter=category_filter, search_query=search_query)
 
-    # 1. CLEAN PRODUCT CODE TO TEXT (NO DECIMALS)
-    if not df.empty and 'Product code' in df.columns:
-        df['Product code'] = df['Product code'].astype(str).str.replace(r'\.0$', '', regex=True).replace(['nan', 'None', '<NA>'], '')
+    # FAST VECTORIZED PROCESSING & CUSTOM SORTING (A-Z LETTERS -> NUMBERS -> SYMBOLS/SPACES)
+    if not df.empty:
+        # 1. Clean Product code vectorized
+        if 'Product code' in df.columns:
+            df['Product code'] = df['Product code'].astype(str).str.replace(r'\.0$', '', regex=True).replace(['nan', 'None', '<NA>'], '')
 
-    # 2. CLEAN START DATE (REMOVE TIME COMPONENT)
-    if not df.empty and 'Starting date for contract execution (contact signature)' in df.columns:
-        start_dt_series = df['Starting date for contract execution (contact signature)'].apply(safe_parse_dt)
-        df['Starting date for contract execution (contact signature)'] = start_dt_series.dt.strftime('%Y-%m-%d').fillna('')
+        # 2. Clean Start Date vectorized
+        if 'Starting date for contract execution (contact signature)' in df.columns:
+            clean_start = df['Starting date for contract execution (contact signature)'].astype(str).str.replace(r'\s*[\/\-]\s*', '-', regex=True).str.strip()
+            parsed_start = pd.to_datetime(clean_start, errors='coerce', format='mixed')
+            df['Starting date for contract execution (contact signature)'] = parsed_start.dt.strftime('%Y-%m-%d').fillna('')
+        else:
+            parsed_start = pd.Series([pd.NaT]*len(df))
 
-    # 3. EXPIRY METRICS, DAYS EXPIRED & FILTERING CALCULATIONS
-    today_midnight = pd.Timestamp(datetime.now().date())
-    ninety_days_later = today_midnight + timedelta(days=90)
-    six_months_later = today_midnight + timedelta(days=180)
+        # 3. Expiry Date: Auto-calculate 1 Year Default if blank + Start Date present
+        today_midnight = pd.Timestamp(datetime.now().date())
+        if 'Contract End Date (Expiry)' in df.columns:
+            clean_exp = df['Contract End Date (Expiry)'].astype(str).str.replace(r'\s*[\/\-]\s*', '-', regex=True).str.strip()
+            parsed_exp = pd.to_datetime(clean_exp, errors='coerce', format='mixed')
+            
+            # Auto-calculate default = Start Date + 1 Year - 1 Day if blank
+            auto_default_exp = parsed_start + pd.DateOffset(years=1) - pd.Timedelta(days=1)
+            final_exp = parsed_exp.fillna(auto_default_exp)
+            
+            df['Contract End Date (Expiry)'] = final_exp.dt.strftime('%Y-%m-%d').fillna('')
 
-    if not df.empty and 'Contract End Date (Expiry)' in df.columns:
-        parsed_exp = df['Contract End Date (Expiry)'].apply(safe_parse_dt)
-        df['Contract End Date (Expiry)'] = parsed_exp.dt.strftime('%Y-%m-%d').fillna(df['Contract End Date (Expiry)'].fillna(''))
-        
-        days_to_exp = (parsed_exp - today_midnight).dt.days
-        days_past_exp = (today_midnight - parsed_exp).dt.days
-        
-        df['Days_To_Expiry'] = days_to_exp.apply(lambda x: int(x) if pd.notna(x) else None)
-        df['Days_Past_Expiry'] = days_past_exp.apply(lambda x: int(x) if pd.notna(x) else None)
+            days_to_exp = (final_exp - today_midnight).dt.days
+            days_past_exp = (today_midnight - final_exp).dt.days
 
-        # Explicit "Days Expired" Column requested: positive integer if expired, 0 if active
-        df['Days Expired'] = days_past_exp.apply(lambda x: int(x) if pd.notna(x) and x > 0 else (0 if pd.notna(x) else None))
+            df['Days_To_Expiry'] = days_to_exp
+            df['Days_Past_Expiry'] = days_past_exp
 
-        # Thresholds: Red <= 90 days (< 3 months or expired), Yellow <= 180 days (3 to 6 months)
-        df['Is_Red_Alert'] = (parsed_exp.notna()) & (days_to_exp <= 90)
-        df['Is_Yellow_Alert'] = (parsed_exp.notna()) & (days_to_exp > 90) & (days_to_exp <= 180)
+            # Days Expired: positive integer if expired (>0), 0 if active/valid
+            df['Days Expired'] = np.where(days_past_exp > 0, days_past_exp, np.where(final_exp.notna(), 0, np.nan))
 
-        # Categorize status for filtering
-        def get_expiry_status_cat(row):
-            if pd.isna(row['Days_To_Expiry']): return "Missing Expiry Date"
-            days = row['Days_To_Expiry']
-            if days < 0: return "Expired / Overdue"
-            elif days <= 90: return "Expiring in < 3 Months"
-            elif days <= 180: return "Expiring in 3–6 Months"
-            else: return "Valid (> 6 Months)"
+            # Alert flags
+            df['Is_Red_Alert'] = (final_exp.notna()) & (days_to_exp <= 90)
+            df['Is_Yellow_Alert'] = (final_exp.notna()) & (days_to_exp > 90) & (days_to_exp <= 180)
 
-        df['Expiry_Status_Cat'] = df.apply(get_expiry_status_cat, axis=1)
+            # Expiry status category vectorized for instant filtering
+            conds = [
+                final_exp.isna(),
+                days_to_exp < 0,
+                days_to_exp <= 90,
+                days_to_exp <= 180
+            ]
+            choices = [
+                "Missing Expiry Date",
+                "Expired / Overdue",
+                "Expiring in < 3 Months",
+                "Expiring in 3–6 Months"
+            ]
+            df['Expiry_Status_Cat'] = np.select(conds, choices, default="Valid (> 6 Months)")
+        else:
+            df['Days_To_Expiry'] = None
+            df['Days_Past_Expiry'] = None
+            df['Days Expired'] = None
+            df['Is_Red_Alert'] = False
+            df['Is_Yellow_Alert'] = False
+            df['Expiry_Status_Cat'] = "Missing Expiry Date"
+
+        # CUSTOM SORTING: 1) Letters A-Z, 2) Digits 0-9, 3) Symbols & Empty spaces
+        if 'Product Description' in df.columns:
+            s_clean = df['Product Description'].astype(str).str.strip()
+            first_char = s_clean.str[0].str.lower()
+            
+            is_alpha = first_char.str.contains(r'^[a-z]$', regex=True, na=False)
+            is_digit = first_char.str.contains(r'^[0-9]$', regex=True, na=False)
+            
+            df['_sort_priority'] = np.where(is_alpha, 1, np.where(is_digit, 2, 3))
+            df['_sort_key'] = s_clean.str.lower()
+            
+            df.sort_values(by=['_sort_priority', '_sort_key'], ascending=[True, True], inplace=True)
+            df.drop(columns=['_sort_priority', '_sort_key'], inplace=True)
+            df.reset_index(drop=True, inplace=True)
     else:
         df['Days_To_Expiry'] = None
         df['Days_Past_Expiry'] = None
@@ -393,9 +434,8 @@ with tab_tracker:
 
     ctrl_col1, ctrl_col2, _ = st.columns([3, 3, 6])
 
-    # EXACT ORIGINAL EXCEL COLUMN SEQUENCE (REF & CONTRACT TITLE TO FRONT, DATES TOGETHER)
+    # EXACT ORIGINAL EXCEL COLUMN SEQUENCE (NO AND ITEM_NO REMOVED)
     preferred_col_order = [
-        'NO',
         'Product code',
         'Ref/N° of Framework Agreement',
         'Title of the contract',
@@ -404,6 +444,7 @@ with tab_tracker:
         'Starting date for contract execution (contact signature)',
         'Contract End Date (Expiry)',
         'Days Expired',
+        'Contract Execution Year',
         'Days Past Expiry',
         'pack size',
         'General medicines/Specialised/Oncology',
@@ -421,7 +462,7 @@ with tab_tracker:
     ]
 
     existing_cols = [c for c in preferred_col_order if c in df.columns]
-    extra_cols = [c for c in df.columns if c not in preferred_col_order and c not in ['id', 'Days_To_Expiry', 'Days_Past_Expiry', 'Is_Red_Alert', 'Is_Yellow_Alert', 'Expiry_Status_Cat']]
+    extra_cols = [c for c in df.columns if c not in preferred_col_order and c not in ['id', 'NO', 'no', 'item_no', 'Days_To_Expiry', 'Days_Past_Expiry', 'Is_Red_Alert', 'Is_Yellow_Alert', 'Expiry_Status_Cat', 'contract_title', 'Answer', 'answer']]
     all_available_cols = existing_cols + extra_cols
     
     with ctrl_col1:
@@ -521,21 +562,88 @@ with tab_tracker:
         if 'Supplier' in df_display.columns:
             gb.configure_column('Supplier', width=220, minWidth=160)
 
+        if 'Contract Execution Year' in df_display.columns:
+            gb.configure_column('Contract Execution Year', header_name='Contract Execution Year', width=170, minWidth=140, editable=True)
+
+        # REAL-TIME CLIENT-SIDE VALUE GETTER FOR "DAYS EXPIRED" (0ms DELAY)
+        js_days_expired_getter = JsCode("""
+        function(params) {
+            if (!params.data) return null;
+            let expStr = params.data['Contract End Date (Expiry)'];
+            let startStr = params.data['Starting date for contract execution (contact signature)'];
+            
+            let expDate = null;
+            if (expStr && expStr.trim() !== '') {
+                expDate = new Date(expStr);
+            } else if (startStr && startStr.trim() !== '') {
+                let sDate = new Date(startStr);
+                if (!isNaN(sDate.getTime())) {
+                    expDate = new Date(sDate);
+                    expDate.setFullYear(expDate.getFullYear() + 1);
+                    expDate.setDate(expDate.getDate() - 1);
+                }
+            }
+            
+            if (!expDate || isNaN(expDate.getTime())) return null;
+            
+            let today = new Date();
+            today.setHours(0, 0, 0, 0);
+            expDate.setHours(0, 0, 0, 0);
+            
+            let diffTime = today.getTime() - expDate.getTime();
+            let diffDays = Math.round(diffTime / (1000 * 3600 * 24));
+            
+            return diffDays > 0 ? diffDays : 0;
+        }
+        """)
+
         # EXPLICIT COLUMN: DAYS EXPIRED
         if 'Days Expired' in df_display.columns:
-            gb.configure_column('Days Expired', header_name='Days Expired', width=140, minWidth=120, editable=False, type=['numericColumn'])
+            gb.configure_column('Days Expired', header_name='Days Expired', width=140, minWidth=120, editable=False, valueGetter=js_days_expired_getter, type=['numericColumn'])
         
-        # BADGE CELL RENDERER FOR "DAYS PAST EXPIRY" / DAYS REMAINING
+        # REAL-TIME CLIENT-SIDE BADGE CELL RENDERER FOR "DAYS PAST EXPIRY" / DAYS REMAINING
         days_past_renderer = JsCode("""
         class DaysPastRenderer {
             init(params) {
                 this.eGui = document.createElement('div');
-                if (!params.data || params.data.Days_To_Expiry === null || params.data.Days_To_Expiry === undefined || isNaN(params.data.Days_To_Expiry)) {
+                this.update(params);
+            }
+            refresh(params) {
+                this.update(params);
+                return true;
+            }
+            update(params) {
+                if (!params.data) {
                     this.eGui.innerHTML = '<span style="color: #a0aec0;">-</span>';
                     return;
                 }
-                let daysToExpiry = parseInt(params.data.Days_To_Expiry, 10);
-                let daysPast = parseInt(params.data.Days_Past_Expiry, 10);
+                let expStr = params.data['Contract End Date (Expiry)'];
+                let startStr = params.data['Starting date for contract execution (contact signature)'];
+                
+                let expDate = null;
+                if (expStr && expStr.trim() !== '') {
+                    expDate = new Date(expStr);
+                } else if (startStr && startStr.trim() !== '') {
+                    let sDate = new Date(startStr);
+                    if (!isNaN(sDate.getTime())) {
+                        expDate = new Date(sDate);
+                        expDate.setFullYear(expDate.getFullYear() + 1);
+                        expDate.setDate(expDate.getDate() - 1);
+                    }
+                }
+                
+                if (!expDate || isNaN(expDate.getTime())) {
+                    this.eGui.innerHTML = '<span style="color: #a0aec0;">-</span>';
+                    return;
+                }
+                
+                let today = new Date();
+                today.setHours(0, 0, 0, 0);
+                expDate.setHours(0, 0, 0, 0);
+                
+                let diffTime = expDate.getTime() - today.getTime();
+                let daysToExpiry = Math.round(diffTime / (1000 * 3600 * 24));
+                let daysPast = -daysToExpiry;
                 
                 let bgColor, textColor, borderColor, label;
                 
@@ -582,7 +690,7 @@ with tab_tracker:
         if existing_cols:
             gb.configure_column(existing_cols[0], checkboxSelection=True)
 
-        # AG-GRID STYLING: ROW HEIGHT 48PX (DOUBLE-LINE HEIGHT), VIRTUALIZATION & CHECKBOX SELECTION
+        # AG-GRID STYLING: ROW HEIGHT 48PX (DOUBLE-LINE HEIGHT), REAL-TIME CLIENT-SIDE ROW COLORING
         gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=100)
         
         gb.configure_grid_options(
@@ -592,17 +700,36 @@ with tab_tracker:
             getRowStyle=JsCode("""
             function(params) {
                 if (!params.data) return null;
-                let daysToExpiry = params.data.Days_To_Expiry;
+                let expStr = params.data['Contract End Date (Expiry)'];
+                let startStr = params.data['Starting date for contract execution (contact signature)'];
                 
-                if (daysToExpiry === null || daysToExpiry === undefined || isNaN(daysToExpiry)) {
+                let expDate = null;
+                if (expStr && expStr.trim() !== '') {
+                    expDate = new Date(expStr);
+                } else if (startStr && startStr.trim() !== '') {
+                    let sDate = new Date(startStr);
+                    if (!isNaN(sDate.getTime())) {
+                        expDate = new Date(sDate);
+                        expDate.setFullYear(expDate.getFullYear() + 1);
+                        expDate.setDate(expDate.getDate() - 1);
+                    }
+                }
+                
+                if (!expDate || isNaN(expDate.getTime())) {
                     return params.node.rowIndex % 2 === 0 ? {'backgroundColor': '#ffffff'} : {'backgroundColor': '#f8fafc'};
                 }
-                let days = parseInt(daysToExpiry, 10);
                 
-                if (days <= 90) {
+                let today = new Date();
+                today.setHours(0, 0, 0, 0);
+                expDate.setHours(0, 0, 0, 0);
+                
+                let diffTime = expDate.getTime() - today.getTime();
+                let daysToExpiry = Math.round(diffTime / (1000 * 3600 * 24));
+                
+                if (daysToExpiry <= 90) {
                     return {'backgroundColor': '#fee2e2', 'color': '#991b1b', 'fontWeight': 'bold'};
                 }
-                if (days <= 180) {
+                if (daysToExpiry <= 180) {
                     return {'backgroundColor': '#fef3c7', 'color': '#854d0e', 'fontWeight': 'bold'};
                 }
                 return params.node.rowIndex % 2 === 0 ? {'backgroundColor': '#ffffff'} : {'backgroundColor': '#f8fafc'};
@@ -638,7 +765,8 @@ with tab_tracker:
             theme='streamlit',
             height=580,
             custom_css=custom_header_css,
-            allow_unsafe_jscode=True
+            allow_unsafe_jscode=True,
+            key="rms_contracts_aggrid_main"
         )
 
         selected_rows = grid_response.get("selected_rows")
