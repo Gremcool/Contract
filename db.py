@@ -8,13 +8,12 @@ import streamlit as st
 
 DB_FILE = os.getenv("DATABASE_PATH", "tender_tracker.db")
 
-# Exact 1:1 mapping matching original Excel headers (NO column removed)
+# Exact 1:1 mapping matching original Excel headers
 COLUMN_MAPPING = {
-    'category': 'Category / Sheet',
+    'category': 'Category',
     'product_code': 'Product code',
     'product_description': 'Product Description',
     'pack_size': 'pack size',
-    'classification': 'General medicines/Specialised/Oncology',
     'currency': 'Currency',
     'unit_price': 'Unit price',
     'incoterm': 'Incoterm',
@@ -26,14 +25,54 @@ COLUMN_MAPPING = {
     'delivery_period': 'Delivey period',
     'starting_date': 'Starting date for contract execution (contact signature)',
     'expiry_date': 'Contract End Date (Expiry)',
+    'validity_period': 'Validity Period (Years)',
     'contract_year': 'Contract Execution Year',
-    'end_user': 'Demandor (End user)',
-    'budget_holder': 'Budget Holder',
     'procurement_officer': 'PROCUREMENT OFFICER',
     'cleaning_action': 'CLEANING ACTION'
 }
 
 REVERSE_MAPPING = {v: k for k, v in COLUMN_MAPPING.items()}
+
+def get_db_col_name(ui_col):
+    """Robustly maps any UI column name (case & whitespace insensitive) to SQLite DB column name."""
+    if ui_col in REVERSE_MAPPING:
+        return REVERSE_MAPPING[ui_col]
+    
+    ui_clean = str(ui_col).strip().lower()
+    for k, v in REVERSE_MAPPING.items():
+        if k.strip().lower() == ui_clean:
+            return v
+            
+    for db_col in COLUMN_MAPPING.keys():
+        if db_col.lower() == ui_clean:
+            return db_col
+            
+    alias_map = {
+        'delivery period': 'delivery_period',
+        'delivey period': 'delivery_period',
+        'procurement officer': 'procurement_officer',
+        'title of contract': 'title_contract',
+        'title of the contract': 'title_contract',
+        'product description': 'product_description',
+        'product code': 'product_code',
+        'validity period': 'validity_period',
+        'validity period (years)': 'validity_period',
+        'contract execution year': 'contract_year',
+        'manufacturer address': 'manufacturer_address',
+        "manufacturer's addresses": 'manufacturer_address',
+        'manufacturer and country of origin': 'manufacturer_origin',
+        'category': 'category',
+        'sheet': 'category',
+        'incoterm': 'incoterm',
+        'supplier': 'supplier',
+        'end_user': 'end_user',
+        'demandor': 'end_user',
+        'demandor (end user)': 'end_user',
+        'budget_holder': 'budget_holder',
+        'budget holder': 'budget_holder',
+        'classification': 'classification'
+    }
+    return alias_map.get(ui_clean, ui_col)
 
 def get_conn():
     db_dir = os.path.dirname(DB_FILE)
@@ -85,6 +124,7 @@ def init_db():
                 delivery_period TEXT,
                 starting_date TEXT,
                 expiry_date TEXT,
+                validity_period INTEGER DEFAULT 1,
                 contract_year TEXT,
                 end_user TEXT,
                 budget_holder TEXT,
@@ -107,10 +147,10 @@ def init_db():
             'manufacturer_origin': 'TEXT', 'manufacturer_address': 'TEXT',
             'supplier': 'TEXT', 'ref_framework': 'TEXT', 'framework_ref': 'TEXT',
             'title_contract': 'TEXT', 'contract_title': 'TEXT', 'delivery_period': 'TEXT',
-            'starting_date': 'TEXT', 'expiry_date': 'TEXT', 'contract_year': 'TEXT',
-            'end_user': 'TEXT', 'budget_holder': 'TEXT', 'procurement_officer': 'TEXT',
-            'cleaning_action': 'TEXT', 'is_deleted': 'INTEGER DEFAULT 0',
-            'deleted_by': 'TEXT', 'deleted_at': 'TEXT'
+            'starting_date': 'TEXT', 'expiry_date': 'TEXT', 'validity_period': 'INTEGER DEFAULT 1',
+            'contract_year': 'TEXT', 'end_user': 'TEXT', 'budget_holder': 'TEXT',
+            'procurement_officer': 'TEXT', 'cleaning_action': 'TEXT',
+            'is_deleted': 'INTEGER DEFAULT 0', 'deleted_by': 'TEXT', 'deleted_at': 'TEXT'
         }
 
         for col, col_type in required_cols.items():
@@ -233,11 +273,11 @@ def load_contracts(category_filter="All", search_query=""):
             params.append(category_filter)
 
         if search_query and search_query.strip():
-            query += " AND (product_description LIKE ? OR product_code LIKE ? OR supplier LIKE ? OR manufacturer_origin LIKE ? OR manufacturer_address LIKE ? OR ref_framework LIKE ? OR framework_ref LIKE ? OR title_contract LIKE ? OR contract_title LIKE ? OR procurement_officer LIKE ? OR category LIKE ?)"
-            term = f"%{search_query.strip()}%"
+            query += " AND (LOWER(product_description) LIKE ? OR LOWER(product_code) LIKE ? OR LOWER(supplier) LIKE ? OR LOWER(manufacturer_origin) LIKE ? OR LOWER(manufacturer_address) LIKE ? OR LOWER(ref_framework) LIKE ? OR LOWER(framework_ref) LIKE ? OR LOWER(title_contract) LIKE ? OR LOWER(contract_title) LIKE ? OR LOWER(procurement_officer) LIKE ? OR LOWER(category) LIKE ?)"
+            term = f"%{search_query.strip().lower()}%"
             params.extend([term]*11)
 
-        # CUSTOM ORDER BY: 1) Letters A-Z, 2) Digits 0-9, 3) Symbols & Empty spaces
+        # SORT BY PRODUCT DESCRIPTION (A-Z LETTERS FIRST, THEN DIGITS, THEN SYMBOLS/SPACES)
         query += """ ORDER BY 
             CASE 
                 WHEN TRIM(product_description) = '' OR product_description IS NULL THEN 3
@@ -257,27 +297,63 @@ def load_contracts(category_filter="All", search_query=""):
     df = pd.DataFrame(data, columns=columns)
     if not df.empty:
         df.rename(columns=COLUMN_MAPPING, inplace=True)
-        # Drop NO, item_no, and unwanted duplicate or test columns
-        df.drop(columns=['no', 'NO', 'item_no', 'is_deleted', 'deleted_by', 'deleted_at', 'framework_ref', 'contract_title', 'Answer', 'answer'], errors='ignore', inplace=True)
+        # Drop NO, item_no, classification and duplicate columns
+        df.drop(columns=['no', 'NO', 'item_no', 'classification', 'Classification', 'end_user', 'Demandor (End user)', 'budget_holder', 'Budget Holder', 'is_deleted', 'deleted_by', 'deleted_at', 'framework_ref', 'contract_title', 'Answer', 'answer'], errors='ignore', inplace=True)
         
         if 'Product code' in df.columns:
             df['Product code'] = df['Product code'].astype(str).str.replace(r'\.0$', '', regex=True).replace(['nan', 'None', '<NA>'], '')
             
     return df
 
-def update_single_cell(contract_id, db_col_name, new_val, user_name="Admin"):
+@st.cache_data(ttl=600)
+def get_unique_categories():
     conn = get_conn()
     try:
         c = conn.cursor()
-        c.execute(f'SELECT "{db_col_name}" FROM contracts WHERE id = ?', (contract_id,))
+        c.execute("SELECT DISTINCT category FROM contracts WHERE (is_deleted = 0 OR is_deleted IS NULL) AND category IS NOT NULL AND TRIM(category) != '' ORDER BY category ASC")
+        rows = c.fetchall()
+        cats = [r[0].strip() for r in rows if r[0] and r[0].strip()]
+        defaults = ["All", "Medicines", "Consumables", "Laboratory", "IMPLANTS_"]
+        for d in defaults:
+            if d not in cats: cats.append(d)
+        return cats
+    finally:
+        conn.close()
+
+def update_single_cell(contract_id, ui_col_name, new_val, user_name="Admin"):
+    conn = get_conn()
+    try:
+        c = conn.cursor()
+        
+        c.execute("PRAGMA table_info(contracts)")
+        valid_db_cols = set(r[1] for r in c.fetchall())
+        
+        db_col_name = get_db_col_name(ui_col_name)
+        if db_col_name not in valid_db_cols:
+            return
+        
+        c.execute(f'SELECT "{db_col_name}", starting_date, validity_period, expiry_date FROM contracts WHERE id = ?', (contract_id,))
         res = c.fetchone()
         old_val = str(res[0]) if res and res[0] is not None else ""
+        cur_start = res[1] if res else ""
+        cur_val = res[2] if res and res[2] else 1
 
         clean_val = str(new_val).strip() if pd.notna(new_val) else ""
         if old_val != clean_val:
             query = f'UPDATE contracts SET "{db_col_name}" = ? WHERE id = ?'
             c.execute(query, (clean_val, contract_id))
             
+            # AUTOMATICALLY RECALCULATE EXPIRY DATE IF VALIDITY PERIOD OR START DATE CHANGED
+            if db_col_name in ['starting_date', 'validity_period']:
+                st_date = clean_val if db_col_name == 'starting_date' else cur_start
+                try: val_yrs = int(clean_val) if db_col_name == 'validity_period' else int(cur_val)
+                except: val_yrs = 1
+
+                st_dt = pd.to_datetime(st_date, errors='coerce')
+                if pd.notna(st_dt):
+                    calc_exp = (st_dt + pd.DateOffset(years=val_yrs) - pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+                    c.execute('UPDATE contracts SET expiry_date = ? WHERE id = ?', (calc_exp, contract_id))
+
             if db_col_name == 'ref_framework':
                 c.execute('UPDATE contracts SET framework_ref = ? WHERE id = ?', (clean_val, contract_id))
             elif db_col_name == 'title_contract':
@@ -287,7 +363,7 @@ def update_single_cell(contract_id, db_col_name, new_val, user_name="Admin"):
             c.execute('''
                 INSERT INTO row_logs (contract_id, user_name, field_changed, old_value, new_value, timestamp)
                 VALUES (?, ?, ?, ?, ?, ?)
-            ''', (contract_id, user_name, COLUMN_MAPPING.get(db_col_name, db_col_name), old_val, clean_val, timestamp))
+            ''', (contract_id, user_name, COLUMN_MAPPING.get(db_col_name, ui_col_name), old_val, clean_val, timestamp))
             
             log_action_cursor(c, f"✏️ Cell '{db_col_name}' updated on Item #{contract_id} by {user_name}")
             
@@ -300,9 +376,27 @@ def update_full_contract(contract_id, row_dict, user_name="Admin"):
     conn = get_conn()
     try:
         c = conn.cursor()
+        
+        c.execute("PRAGMA table_info(contracts)")
+        valid_db_cols = set(r[1] for r in c.fetchall())
+        
+        # Recalculate expiry date if starting date or validity period updated
+        st_date_input = row_dict.get('Starting date for contract execution (contact signature)', None)
+        val_yrs_input = row_dict.get('Validity Period (Years)', None)
+
+        if st_date_input is not None and val_yrs_input is not None:
+            try:
+                v_yrs = int(val_yrs_input)
+                st_dt = pd.to_datetime(st_date_input, errors='coerce')
+                if pd.notna(st_dt):
+                    row_dict['Contract End Date (Expiry)'] = (st_dt + pd.DateOffset(years=v_yrs) - pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+            except Exception:
+                pass
+
         for ui_col, new_val in row_dict.items():
-            db_col = REVERSE_MAPPING.get(ui_col, ui_col)
-            if db_col in ['id', 'is_deleted', 'deleted_by', 'deleted_at']: continue
+            db_col = get_db_col_name(ui_col)
+            if db_col not in valid_db_cols or db_col in ['id', 'is_deleted', 'deleted_by', 'deleted_at']: 
+                continue
             
             c.execute(f'SELECT "{db_col}" FROM contracts WHERE id = ?', (contract_id,))
             res = c.fetchone()
@@ -322,7 +416,7 @@ def update_full_contract(contract_id, row_dict, user_name="Admin"):
                 c.execute('''
                     INSERT INTO row_logs (contract_id, user_name, field_changed, old_value, new_value, timestamp)
                     VALUES (?, ?, ?, ?, ?, ?)
-                ''', (contract_id, user_name, COLUMN_MAPPING.get(db_col, db_col), old_val, clean_new_val, timestamp))
+                ''', (contract_id, user_name, COLUMN_MAPPING.get(db_col, ui_col), old_val, clean_new_val, timestamp))
 
         log_action_cursor(c, f"✏️ Full updates saved for Contract Item #{contract_id} by {user_name}")
         conn.commit()
@@ -405,7 +499,7 @@ def import_excel_master(file_or_path):
                 row_tuple = (
                     str(sheet).strip(), item_no, p_code, desc, pack_size, classif, currency, u_price,
                     incoterm, m_origin, m_addr, supplier, fw_ref, fw_ref, contract_title, contract_title, deliv, start_date,
-                    expiry_date, contract_year, end_user, budget, officer, clean_act, 0, None, None
+                    expiry_date, 1, contract_year, end_user, budget, officer, clean_act, 0, None, None
                 )
                 rows_to_insert.append(row_tuple)
 
@@ -414,9 +508,9 @@ def import_excel_master(file_or_path):
                     category, no, product_code, product_description, pack_size,
                     classification, currency, unit_price, incoterm, manufacturer_origin,
                     manufacturer_address, supplier, ref_framework, framework_ref, title_contract, contract_title,
-                    delivery_period, starting_date, expiry_date, contract_year, end_user, budget_holder, procurement_officer,
+                    delivery_period, starting_date, expiry_date, validity_period, contract_year, end_user, budget_holder, procurement_officer,
                     cleaning_action, is_deleted, deleted_by, deleted_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', rows_to_insert)
             total_imported += len(rows_to_insert)
 
