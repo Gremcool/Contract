@@ -18,7 +18,7 @@ import db
 st.set_page_config(page_title="RMS Contract & Tender Tracker", layout="wide", initial_sidebar_state="expanded")
 db.init_db()
 
-# --- TIGHT CUSTOM CSS + AG-GRID HEADER STYLING (PREVENTS RE-RENDER FLASHES) ---
+# --- TIGHT CUSTOM CSS + AG-GRID HEADER STYLING ---
 st.markdown("""
     <style>
         header {visibility: hidden;}
@@ -44,7 +44,7 @@ st.markdown("""
             font-size: 13px !important;
             border-right: 1px solid rgba(255, 255, 255, 0.15) !important;
         }
-        .ag-header-cell-label {
+        .ag-header-cell-label, .ag-header-cell-text, .ag-header-icon, .ag-icon {
             color: #ffffff !important;
             font-weight: bold !important;
         }
@@ -832,6 +832,31 @@ def render_tracker_grid(df, category_filter, status_filter, search_query):
             """)
         )
 
+        custom_header_css = {
+            ".ag-header": {
+                "background": "linear-gradient(90deg, #1e3c72 0%, #2a5298 100%) !important",
+                "border-bottom": "2px solid #1e3c72 !important"
+            },
+            ".ag-header-cell": {
+                "background-color": "transparent !important",
+                "color": "#ffffff !important",
+                "font-weight": "bold !important",
+                "font-size": "13px !important",
+                "border-right": "1px solid rgba(255, 255, 255, 0.15) !important"
+            },
+            ".ag-header-cell-label": {
+                "color": "#ffffff !important",
+                "font-weight": "bold !important"
+            },
+            ".ag-header-cell-text": {
+                "color": "#ffffff !important",
+                "font-weight": "bold !important"
+            },
+            ".ag-header-icon, .ag-icon": {
+                "color": "#ffffff !important"
+            }
+        }
+
         grid_version = st.session_state.get('grid_version', 0)
         grid_options = gb.build()
         grid_response = AgGrid(
@@ -841,8 +866,9 @@ def render_tracker_grid(df, category_filter, status_filter, search_query):
             data_return_mode=DataReturnMode.AS_INPUT,
             theme='streamlit',
             height=580,
+            custom_css=custom_header_css,
             allow_unsafe_jscode=True,
-            key=f"rms_aggrid_master_table_{grid_version}"
+            key=f"rms_aggrid_master_table_{category_filter}_{status_filter}_{search_query}_{grid_version}"
         )
 
         selected_rows = grid_response.get("selected_rows")
@@ -968,12 +994,22 @@ with tab_import:
     st.subheader("📂 Import / Reload Master Excel Workbook")
     st.markdown("Upload your **CONTRACT MASTER LIST.xlsx** file containing sheets: `Medicines`, `Consumables`, `Laboratory`, `IMPLANTS_`.")
 
-    uploaded_excel = st.file_uploader("Upload Contract Master Excel File", type=["xlsx", "xls", "ods"])
+    uploaded_excel = st.file_uploader("Upload Contract Master Excel File", type=["xlsx", "xls"])
     if uploaded_excel and st.button("Process & Import Workbook", type="primary"):
-        with st.spinner("Processing sheets and updating SQLite database..."):
-            count = db.import_excel_master(uploaded_excel)
-            st.success(f"Successfully imported {count} items across all sheets!")
-            st.rerun()
+        filename = str(uploaded_excel.name).lower()
+        if not (filename.endswith('.xlsx') or filename.endswith('.xls')):
+            st.error("Invalid file type. Please upload a valid Microsoft Excel file (.xlsx or .xls).")
+        else:
+            with st.spinner("Processing sheets and updating SQLite database..."):
+                try:
+                    success, result = db.import_excel_master(uploaded_excel)
+                    if success:
+                        st.success(f"Successfully imported {result} items across all sheets!")
+                        st.rerun()
+                    else:
+                        st.error(f"Import Failed: {result}")
+                except Exception as e:
+                    st.error("Failed to process file. Please ensure you are uploading a valid, uncorrupted Excel (.xlsx or .xls) workbook.")
 
 # ==========================================
 # TAB 4: SYSTEM AUDIT TRAIL

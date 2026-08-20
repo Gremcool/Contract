@@ -448,9 +448,14 @@ def get_field_val(row, *aliases):
     return ""
 
 def import_excel_master(file_or_path):
-    xls = pd.ExcelFile(file_or_path)
+    # Strictly validate Excel extension
+    filename = str(getattr(file_or_path, 'name', file_or_path)).lower()
+    if not (filename.endswith('.xlsx') or filename.endswith('.xls')):
+        return False, "Unsupported file format. Please upload a valid Microsoft Excel file (.xlsx or .xls)."
+
     conn = get_conn()
     try:
+        xls = pd.ExcelFile(file_or_path)
         c = conn.cursor()
         total_imported = 0
         for sheet in xls.sheet_names:
@@ -517,7 +522,9 @@ def import_excel_master(file_or_path):
         log_action_cursor(c, f"📁 Master Excel Imported: {total_imported} records across {len(xls.sheet_names)} sheets.")
         conn.commit()
         clear_cache()
-        return total_imported
+        return True, total_imported
+    except Exception as e:
+        return False, f"Error processing Excel file: {str(e)}"
     finally:
         conn.close()
 
