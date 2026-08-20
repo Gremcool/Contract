@@ -302,7 +302,12 @@ def load_contracts(category_filter="All", search_query=""):
         
         if 'Product code' in df.columns:
             df['Product code'] = df['Product code'].astype(str).str.replace(r'\.0$', '', regex=True).replace(['nan', 'None', '<NA>'], '')
-            
+
+        # DROP DUPLICATE ROWS ACROSS ALL BUSINESS DATA COLUMNS (EXCLUDING DB ID)
+        cols_for_dedup = [c for c in df.columns if c != 'id']
+        df.drop_duplicates(subset=cols_for_dedup, keep='first', inplace=True)
+        df.reset_index(drop=True, inplace=True)
+
     return df
 
 @st.cache_data(ttl=600)
@@ -461,6 +466,9 @@ def import_excel_master(file_or_path):
         for sheet in xls.sheet_names:
             df = pd.read_excel(xls, sheet_name=sheet)
             df.dropna(how='all', inplace=True)
+            
+            # DROP DUPES DIRECTLY FROM EXCEL SHEET BEFORE INSERTING
+            df.drop_duplicates(inplace=True)
             
             rows_to_insert = []
             for idx, row in df.iterrows():
