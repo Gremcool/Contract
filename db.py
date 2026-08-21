@@ -58,6 +58,8 @@ def get_db_col_name(ui_col):
         'validity period': 'validity_period',
         'validity period (years)': 'validity_period',
         'contract execution year': 'contract_year',
+        'contract year': 'contract_year',
+        'execution year': 'contract_year',
         'manufacturer address': 'manufacturer_address',
         "manufacturer's addresses": 'manufacturer_address',
         'manufacturer and country of origin': 'manufacturer_origin',
@@ -86,15 +88,35 @@ def get_conn():
     conn.execute("PRAGMA busy_timeout=60000;")
     return conn
 
-def clear_cache():
-    try:
-        st.cache_data.clear()
-    except Exception:
-        pass
-
 def log_action_cursor(cursor, message):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute("INSERT INTO logs (timestamp, message) VALUES (?, ?)", (timestamp, message))
+
+def cleanup_database_duplicates():
+    """Purges duplicate contract entries matching core product identity, retaining MAX(id)."""
+    conn = get_conn()
+    try:
+        c = conn.cursor()
+        c.execute('''
+            DELETE FROM contracts
+            WHERE id NOT IN (
+                SELECT MAX(id)
+                FROM contracts
+                WHERE is_deleted = 0 OR is_deleted IS NULL
+                GROUP BY 
+                    LOWER(TRIM(COALESCE(category, ''))),
+                    LOWER(TRIM(COALESCE(product_code, ''))),
+                    LOWER(TRIM(COALESCE(product_description, ''))),
+                    LOWER(TRIM(COALESCE(pack_size, ''))),
+                    LOWER(TRIM(COALESCE(supplier, ''))),
+                    LOWER(TRIM(COALESCE(ref_framework, '')))
+            ) AND (is_deleted = 0 OR is_deleted IS NULL);
+        ''')
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        conn.close()
 
 def init_db():
     conn = get_conn()
@@ -164,7 +186,7 @@ def init_db():
         if 'framework_ref' in existing_cols and 'ref_framework' in existing_cols:
             try:
                 c.execute("UPDATE contracts SET ref_framework = framework_ref WHERE (ref_framework IS NULL OR ref_framework = '') AND framework_ref IS NOT NULL AND framework_ref != ''")
-                c.execute("UPDATE contracts SET framework_ref = ref_framework WHERE (framework_ref IS NULL OR framework_ref = '') AND ref_framework IS NOT NULL AND ref_framework != ''")
+                c.execute("UPDATE contracts SET framework_ref = ref_framework WHERE (framework_ref IS NULL OR framework_ref = '') AND framework_ref IS NOT NULL AND framework_ref != ''")
             except sqlite3.OperationalError:
                 pass
 
@@ -236,15 +258,20 @@ def init_db():
             )
         ''')
 
-        # 7. PERFORMANCE INDEXES
+        # 7. PERFORMANCE INDEXES FOR ULTRA-FAST QUERIES
         c.execute("CREATE INDEX IF NOT EXISTS idx_contracts_active ON contracts(is_deleted, category);")
         c.execute("CREATE INDEX IF NOT EXISTS idx_contracts_pdesc ON contracts(product_description);")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_contracts_lower_desc ON contracts(LOWER(TRIM(product_description)));")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_contracts_cat_active ON contracts(category, is_deleted);")
         c.execute("CREATE INDEX IF NOT EXISTS idx_row_docs_cid ON row_documents(contract_id);")
         c.execute("CREATE INDEX IF NOT EXISTS idx_row_logs_cid ON row_logs(contract_id);")
 
         conn.commit()
     finally:
         conn.close()
+
+    # Automatic one-time cleanup of production duplicates on boot
+    cleanup_database_duplicates()
 
 def add_custom_column(col_name):
     conn = get_conn()
@@ -253,42 +280,19 @@ def add_custom_column(col_name):
         c.execute(f'ALTER TABLE contracts ADD COLUMN "{col_name}" TEXT')
         log_action_cursor(c, f"➕ Added custom column: '{col_name}'")
         conn.commit()
-        clear_cache()
+        st.session_state['needs_db_reload'] = True
         return True, f"Column '{col_name}' added successfully!"
     except sqlite3.OperationalError:
         return False, f"Column '{col_name}' already exists or name is invalid."
     finally:
         conn.close()
 
-@st.cache_data(ttl=600)
-def load_contracts(category_filter="All", search_query=""):
+def load_contracts_direct():
+    """Loads all active records from SQLite into memory fast."""
     conn = get_conn()
     try:
         c = conn.cursor()
-        query = "SELECT * FROM contracts WHERE (is_deleted = 0 OR is_deleted IS NULL)"
-        params = []
-
-        if category_filter and category_filter != "All":
-            query += " AND category = ?"
-            params.append(category_filter)
-
-        if search_query and search_query.strip():
-            query += " AND (LOWER(product_description) LIKE ? OR LOWER(product_code) LIKE ? OR LOWER(supplier) LIKE ? OR LOWER(manufacturer_origin) LIKE ? OR LOWER(manufacturer_address) LIKE ? OR LOWER(ref_framework) LIKE ? OR LOWER(framework_ref) LIKE ? OR LOWER(title_contract) LIKE ? OR LOWER(contract_title) LIKE ? OR LOWER(procurement_officer) LIKE ? OR LOWER(category) LIKE ?)"
-            term = f"%{search_query.strip().lower()}%"
-            params.extend([term]*11)
-
-        # SORT BY PRODUCT DESCRIPTION (A-Z LETTERS FIRST, THEN DIGITS, THEN SYMBOLS/SPACES)
-        query += """ ORDER BY 
-            CASE 
-                WHEN TRIM(product_description) = '' OR product_description IS NULL THEN 3
-                WHEN LOWER(SUBSTR(TRIM(product_description), 1, 1)) BETWEEN 'a' AND 'z' THEN 1
-                WHEN SUBSTR(TRIM(product_description), 1, 1) BETWEEN '0' AND '9' THEN 2
-                ELSE 3
-            END ASC,
-            LOWER(TRIM(product_description)) ASC,
-            id ASC"""
-        
-        c.execute(query, params)
+        c.execute("SELECT * FROM contracts WHERE (is_deleted = 0 OR is_deleted IS NULL) ORDER BY id ASC")
         data = c.fetchall()
         columns = [desc[0] for desc in c.description] if c.description else []
     finally:
@@ -297,20 +301,31 @@ def load_contracts(category_filter="All", search_query=""):
     df = pd.DataFrame(data, columns=columns)
     if not df.empty:
         df.rename(columns=COLUMN_MAPPING, inplace=True)
-        # Drop NO, item_no, classification and duplicate columns
         df.drop(columns=['no', 'NO', 'item_no', 'classification', 'Classification', 'end_user', 'Demandor (End user)', 'budget_holder', 'Budget Holder', 'is_deleted', 'deleted_by', 'deleted_at', 'framework_ref', 'contract_title', 'Answer', 'answer'], errors='ignore', inplace=True)
         
         if 'Product code' in df.columns:
             df['Product code'] = df['Product code'].astype(str).str.replace(r'\.0$', '', regex=True).replace(['nan', 'None', '<NA>'], '')
 
-        # DROP DUPLICATE ROWS ACROSS ALL BUSINESS DATA COLUMNS (EXCLUDING DB ID)
-        cols_for_dedup = [c for c in df.columns if c != 'id']
-        df.drop_duplicates(subset=cols_for_dedup, keep='first', inplace=True)
-        df.reset_index(drop=True, inplace=True)
+        # DEDUPLICATE: RETAIN LATEST EDITED ROW (HIGHEST ID) FOR MATCHING ITEMS
+        dedup_cols = ['Category', 'Product code', 'Product Description', 'pack size', 'Supplier', 'Ref/N° of Framework Agreement']
+        existing_dedup = [c for c in dedup_cols if c in df.columns]
+        if existing_dedup:
+            df = df.sort_values(by='id', ascending=True).groupby(existing_dedup, as_index=False, dropna=False).last()
+
+        # FAST SORT BY PRODUCT DESCRIPTION
+        if 'Product Description' in df.columns:
+            s_clean = df['Product Description'].astype(str).str.strip()
+            first_char = s_clean.str[0].str.lower()
+            is_alpha = first_char.str.contains(r'^[a-z]$', regex=True, na=False)
+            is_digit = first_char.str.contains(r'^[0-9]$', regex=True, na=False)
+            df['_sort_priority'] = np.where(is_alpha, 1, np.where(is_digit, 2, 3))
+            df['_sort_key'] = s_clean.str.lower()
+            df.sort_values(by=['_sort_priority', '_sort_key'], ascending=[True, True], inplace=True)
+            df.drop(columns=['_sort_priority', '_sort_key'], inplace=True)
+            df.reset_index(drop=True, inplace=True)
 
     return df
 
-@st.cache_data(ttl=600)
 def get_unique_categories():
     conn = get_conn()
     try:
@@ -318,10 +333,12 @@ def get_unique_categories():
         c.execute("SELECT DISTINCT category FROM contracts WHERE (is_deleted = 0 OR is_deleted IS NULL) AND category IS NOT NULL AND TRIM(category) != '' ORDER BY category ASC")
         rows = c.fetchall()
         cats = [r[0].strip() for r in rows if r[0] and r[0].strip()]
-        defaults = ["All", "Medicines", "Consumables", "Laboratory", "IMPLANTS_"]
+        defaults = ["Medicines", "Consumables", "Laboratory", "IMPLANTS_"]
         for d in defaults:
             if d not in cats: cats.append(d)
-        return cats
+        
+        cats = [c for c in cats if c != "All"]
+        return ["All"] + cats
     finally:
         conn.close()
 
@@ -373,7 +390,7 @@ def update_single_cell(contract_id, ui_col_name, new_val, user_name="Admin"):
             log_action_cursor(c, f"✏️ Cell '{db_col_name}' updated on Item #{contract_id} by {user_name}")
             
         conn.commit()
-        clear_cache()
+        st.session_state['needs_db_reload'] = True
     finally:
         conn.close()
 
@@ -425,7 +442,7 @@ def update_full_contract(contract_id, row_dict, user_name="Admin"):
 
         log_action_cursor(c, f"✏️ Full updates saved for Contract Item #{contract_id} by {user_name}")
         conn.commit()
-        clear_cache()
+        st.session_state['needs_db_reload'] = True
     finally:
         conn.close()
 
@@ -437,7 +454,7 @@ def delete_contract(contract_id, user_name):
         c.execute("UPDATE contracts SET is_deleted = 1, deleted_by = ?, deleted_at = ? WHERE id = ?", (user_name, timestamp, contract_id))
         log_action_cursor(c, f"🗑️ Contract Item #{contract_id} deleted by {user_name}")
         conn.commit()
-        clear_cache()
+        st.session_state['needs_db_reload'] = True
     finally:
         conn.close()
 
@@ -453,7 +470,6 @@ def get_field_val(row, *aliases):
     return ""
 
 def import_excel_master(file_or_path):
-    # Strictly validate Excel extension
     filename = str(getattr(file_or_path, 'name', file_or_path)).lower()
     if not (filename.endswith('.xlsx') or filename.endswith('.xls')):
         return False, "Unsupported file format. Please upload a valid Microsoft Excel file (.xlsx or .xls)."
@@ -466,8 +482,6 @@ def import_excel_master(file_or_path):
         for sheet in xls.sheet_names:
             df = pd.read_excel(xls, sheet_name=sheet)
             df.dropna(how='all', inplace=True)
-            
-            # DROP DUPES DIRECTLY FROM EXCEL SHEET BEFORE INSERTING
             df.drop_duplicates(inplace=True)
             
             rows_to_insert = []
@@ -529,14 +543,15 @@ def import_excel_master(file_or_path):
 
         log_action_cursor(c, f"📁 Master Excel Imported: {total_imported} records across {len(xls.sheet_names)} sheets.")
         conn.commit()
-        clear_cache()
-        return True, total_imported
+        st.session_state['needs_db_reload'] = True
     except Exception as e:
         return False, f"Error processing Excel file: {str(e)}"
     finally:
         conn.close()
 
-@st.cache_data(ttl=600)
+    cleanup_database_duplicates()
+    return True, total_imported
+
 def get_rms_emails():
     conn = get_conn()
     try:
@@ -556,7 +571,6 @@ def add_rms_email(name, email, department, role):
                   (name, email, department, role, created_at))
         log_action_cursor(c, f"📧 Added RMS Email recipient: {email} ({name})")
         conn.commit()
-        clear_cache()
         return True, "Email successfully registered!"
     except sqlite3.IntegrityError:
         return False, "This email address is already registered."
@@ -570,7 +584,6 @@ def delete_rms_email(email_id):
         c.execute("DELETE FROM rms_emails WHERE id = ?", (email_id,))
         log_action_cursor(c, f"📧 Deleted RMS Email ID: {email_id}")
         conn.commit()
-        clear_cache()
     finally:
         conn.close()
 
@@ -594,7 +607,6 @@ def save_row_documents(contract_id, uploaded_files, uploader_name):
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', (contract_id, next_doc_num, f.name, f.type, len(file_bytes), file_bytes, uploader_name, timestamp))
             
-            # ALSO LOG TO ROW_LOGS SO ATTACHED DOCUMENTS SHOW UP IN THE TRAIL
             c.execute('''
                 INSERT INTO row_logs (contract_id, user_name, field_changed, old_value, new_value, timestamp)
                 VALUES (?, ?, ?, ?, ?, ?)
@@ -604,7 +616,6 @@ def save_row_documents(contract_id, uploaded_files, uploader_name):
             saved_count += 1
         
         conn.commit()
-        clear_cache()
         return saved_count
     finally:
         conn.close()
@@ -640,7 +651,6 @@ def delete_row_document(doc_id, user_name="Admin"):
 
             log_action_cursor(c, f"🗑️ Doc #{doc_num} ('{fname}') deleted for Item #{contract_id} by {user_name}")
             conn.commit()
-            clear_cache()
     finally:
         conn.close()
 
