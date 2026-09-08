@@ -122,7 +122,7 @@ def invalidate_master_cache():
 
 def create_kpi_card(title, value, bg_color, text_color, border_color, icon=""):
     return f"""
-    <div style="background: {bg_color}; padding: 12px 8px; border-radius: 8px; text-align: center; border: 1px solid {border_color}; box-shadow: 0 2px 4px rgba(0,0,0,0.04); margin-bottom: 4px;">
+    <div style="background: {bg_color}; padding: 12px 8px; border-radius: 8px; text-align: center; border: 1px solid {border_color}; box-shadow: 0 2px 4px rgba(0,0,0,0.04); margin-bottom: 12px;">
         <p style="margin:0; color: {text_color}; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">{icon} {title}</p>
         <h2 style="margin:0; color: {text_color}; font-size: 24px; font-weight: 800; padding-top: 2px;">{value}</h2>
     </div>
@@ -342,7 +342,7 @@ RMS Procurement System"""
                         if success:
                             db.log_action(f"📧 Email alert sent for Item #{contract_id} to {', '.join(all_recipients)}")
                             st.session_state['_last_processed_signal'] = None
-                            st.toast("All data saved", icon="✅")
+                            st.toast("Email sent successfully", icon="✅")
                             st.rerun()
                         else: st.error(msg)
         with c_close:
@@ -411,117 +411,118 @@ def edit_contract_dialog(row_data):
         raw_exp = safe_parse_dt(row_data.get('Contract End Date (Expiry)', ''))
         default_exp = raw_exp.date() if pd.notna(raw_exp) else None
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        raw_pcode = str(row_data.get('Product code', '')).replace('.0', '')
-        e_code = st.text_input("Product Code", value=raw_pcode)
-        e_supp = st.text_input("Supplier", value=str(row_data.get('Supplier', '')))
-        e_start = st.date_input("Starting Date", value=default_start)
-    with c2:
-        e_fw = st.text_input("Ref/N° of Framework Agreement", value=str(row_data.get('Ref/N° of Framework Agreement', '')))
-        e_off = st.text_input("PROCUREMENT OFFICER", value=str(row_data.get('PROCUREMENT OFFICER', '')))
-        e_exp = st.date_input("Contract End Date (Expiry)", value=default_exp)
-    with c3:
-        e_uprice = st.text_input("Unit Price", value=str(row_data.get('Unit price', '')))
-        e_curr = st.text_input("Currency", value=str(row_data.get('Currency', '')))
-        e_pack = st.text_input("Pack Size", value=str(row_data.get('pack size', '')))
+    with st.form(f"edit_form_{contract_id}"):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            raw_pcode = str(row_data.get('Product code', '')).replace('.0', '')
+            e_code = st.text_input("Product Code", value=raw_pcode)
+            e_supp = st.text_input("Supplier", value=str(row_data.get('Supplier', '')))
+            e_start = st.date_input("Starting Date", value=default_start)
+        with c2:
+            e_fw = st.text_input("Ref/N° of Framework Agreement", value=str(row_data.get('Ref/N° of Framework Agreement', '')))
+            e_off = st.text_input("PROCUREMENT OFFICER", value=str(row_data.get('PROCUREMENT OFFICER', '')))
+            e_exp = st.date_input("Contract End Date (Expiry)", value=default_exp)
+        with c3:
+            e_uprice = st.text_input("Unit Price", value=str(row_data.get('Unit price', '')))
+            e_curr = st.text_input("Currency", value=str(row_data.get('Currency', '')))
+            e_pack = st.text_input("Pack Size", value=str(row_data.get('pack size', '')))
 
-    c_extra1, c_extra2, c_extra3, c_extra4 = st.columns(4)
-    with c_extra1:
-        e_validity = st.number_input("Validity Period (Years)", min_value=1, max_value=50, value=current_validity, step=1)
-    with c_extra2:
-        computed_year = calc_contract_execution_year(e_start.strftime('%Y-%m-%d') if e_start else "")
-        st.text_input("Contract Execution Year (Auto)", value=computed_year, disabled=True)
-    with c_extra3:
-        e_inco = st.text_input("Incoterm", value=str(row_data.get('Incoterm', '')))
-    with c_extra4:
-        e_cat = st.text_input("Category", value=str(row_data.get('Category', '')))
+        c_extra1, c_extra2, c_extra3, c_extra4 = st.columns(4)
+        with c_extra1:
+            e_validity = st.number_input("Validity Period (Years)", min_value=1, max_value=50, value=current_validity, step=1)
+        with c_extra2:
+            computed_year = calc_contract_execution_year(e_start.strftime('%Y-%m-%d') if e_start else "")
+            st.text_input("Contract Execution Year (Auto)", value=computed_year, disabled=True)
+        with c_extra3:
+            e_inco = st.text_input("Incoterm", value=str(row_data.get('Incoterm', '')))
+        with c_extra4:
+            e_cat = st.text_input("Category", value=str(row_data.get('Category', '')))
 
-    c_m1, c_m2 = st.columns(2)
-    with c_m1:
-        e_morigin = st.text_input("Manufacturer and country of origin", value=str(row_data.get('Manufacturer and country of origin', '')))
-    with c_m2:
-        e_deliv = st.text_input("Delivery Period", value=str(row_data.get('Delivey period', '')))
+        c_m1, c_m2 = st.columns(2)
+        with c_m1:
+            e_morigin = st.text_input("Manufacturer and country of origin", value=str(row_data.get('Manufacturer and country of origin', '')))
+        with c_m2:
+            e_deliv = st.text_input("Delivery Period", value=str(row_data.get('Delivey period', '')))
 
-    val_title = str(row_data.get('Title of the contract', ''))
-    e_title = st.text_area("📝 Title of the Contract", value=val_title, height=70)
+        val_title = str(row_data.get('Title of the contract', ''))
+        e_title = st.text_area("📝 Title of the Contract", value=val_title, height=70)
 
-    val_desc = str(row_data.get('Product Description', row_data.get('Product description', '')))
-    e_desc = st.text_area("📋 Product Description", value=val_desc, height=90)
+        val_desc = str(row_data.get('Product Description', row_data.get('Product description', '')))
+        e_desc = st.text_area("📋 Product Description", value=val_desc, height=90)
 
-    val_clean = str(row_data.get('CLEANING ACTION', ''))
-    e_clean = st.text_area("💬 CLEANING ACTION / Notes", value=val_clean, height=70)
+        val_clean = str(row_data.get('CLEANING ACTION', ''))
+        e_clean = st.text_area("💬 CLEANING ACTION / Notes", value=val_clean, height=70)
 
-    f_save, f_close = st.columns([3, 1])
-    with f_save:
-        submit_clicked = st.button("Save All Contract Changes", type="primary", use_container_width=True, key=f"btn_save_edit_{contract_id}")
-    with f_close:
-        close_clicked = st.button("❌ Close", use_container_width=True, key=f"btn_close_edit_{contract_id}")
+        f_save, f_close = st.columns([3, 1])
+        with f_save:
+            submit_clicked = st.form_submit_button("Save All Contract Changes", type="primary", use_container_width=True)
+        with f_close:
+            close_clicked = st.form_submit_button("❌ Close", use_container_width=True)
 
-    if submit_clicked:
-        start_date_formatted = e_start.strftime('%Y-%m-%d') if e_start else ""
-        
-        if e_start and e_validity:
-            calc_new_exp = (pd.to_datetime(e_start) + pd.DateOffset(years=int(e_validity)) - pd.Timedelta(days=1)).strftime('%Y-%m-%d')
-        else:
-            calc_new_exp = e_exp.strftime('%Y-%m-%d') if e_exp else ""
-
-        updated_fields = {
-            'Product code': e_code,
-            'Supplier': e_supp,
-            'Ref/N° of Framework Agreement': e_fw,
-            'PROCUREMENT OFFICER': e_off,
-            'Unit price': e_uprice,
-            'Currency': e_curr,
-            'Validity Period (Years)': e_validity,
-            'Contract Execution Year': calc_contract_execution_year(start_date_formatted),
-            'pack size': e_pack,
-            'Incoterm': e_inco,
-            'Category': e_cat,
-            'Manufacturer and country of origin': e_morigin,
-            'Delivey period': e_deliv,
-            'Title of the contract': e_title,
-            'Product Description': e_desc,
-            'CLEANING ACTION': e_clean,
-            'Starting date for contract execution (contact signature)': start_date_formatted,
-            'Contract End Date (Expiry)': calc_new_exp
-        }
-        
-        db.update_full_contract(contract_id, updated_fields, user_name="Admin Officer")
-        
-        if 'master_df' in st.session_state:
-            m_df = st.session_state['master_df']
-            mask = m_df['id'] == contract_id
-            for k, v in updated_fields.items():
-                if k in m_df.columns:
-                    m_df.loc[mask, k] = v
+        if submit_clicked:
+            start_date_formatted = e_start.strftime('%Y-%m-%d') if e_start else ""
             
-            if calc_new_exp:
-                exp_dt = pd.to_datetime(calc_new_exp)
-                today_midnight = pd.Timestamp(datetime.now().date())
-                days_to_exp = (exp_dt - today_midnight).days
-                days_past_exp = (today_midnight - exp_dt).days
-                
-                m_df.loc[mask, 'Days_To_Expiry'] = days_to_exp
-                m_df.loc[mask, 'Days_Past_Expiry'] = days_past_exp
-                m_df.loc[mask, 'Days Expired'] = days_past_exp if days_past_exp > 0 else 0
-                m_df.loc[mask, 'Is_Red_Alert'] = days_to_exp <= 90
-                m_df.loc[mask, 'Is_Yellow_Alert'] = (days_to_exp > 90) and (days_to_exp <= 180)
-                
-                if days_to_exp < 0: cat_val = "Expired / Overdue"
-                elif days_to_exp <= 90: cat_val = "Expiring in < 3 Months"
-                elif days_to_exp <= 180: cat_val = "Expiring in 3–6 Months"
-                else: cat_val = "Valid (> 6 Months)"
-                m_df.loc[mask, 'Expiry_Status_Cat'] = cat_val
+            if e_start and e_validity:
+                calc_new_exp = (pd.to_datetime(e_start) + pd.DateOffset(years=int(e_validity)) - pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+            else:
+                calc_new_exp = e_exp.strftime('%Y-%m-%d') if e_exp else ""
 
-        st.session_state['_last_processed_signal'] = None
-        invalidate_master_cache()
-        st.toast("All data saved", icon="✅")
-        st.rerun()
+            updated_fields = {
+                'Product code': e_code,
+                'Supplier': e_supp,
+                'Ref/N° of Framework Agreement': e_fw,
+                'PROCUREMENT OFFICER': e_off,
+                'Unit price': e_uprice,
+                'Currency': e_curr,
+                'Validity Period (Years)': e_validity,
+                'Contract Execution Year': calc_contract_execution_year(start_date_formatted),
+                'pack size': e_pack,
+                'Incoterm': e_inco,
+                'Category': e_cat,
+                'Manufacturer and country of origin': e_morigin,
+                'Delivey period': e_deliv,
+                'Title of the contract': e_title,
+                'Product Description': e_desc,
+                'CLEANING ACTION': e_clean,
+                'Starting date for contract execution (contact signature)': start_date_formatted,
+                'Contract End Date (Expiry)': calc_new_exp
+            }
+            
+            db.update_full_contract(contract_id, updated_fields, user_name="Admin Officer")
+            
+            if 'master_df' in st.session_state:
+                m_df = st.session_state['master_df']
+                mask = m_df['id'] == contract_id
+                for k, v in updated_fields.items():
+                    if k in m_df.columns:
+                        m_df.loc[mask, k] = v
+                
+                if calc_new_exp:
+                    exp_dt = pd.to_datetime(calc_new_exp)
+                    today_midnight = pd.Timestamp(datetime.now().date())
+                    days_to_exp = (exp_dt - today_midnight).days
+                    days_past_exp = (today_midnight - exp_dt).days
+                    
+                    m_df.loc[mask, 'Days_To_Expiry'] = days_to_exp
+                    m_df.loc[mask, 'Days_Past_Expiry'] = days_past_exp
+                    m_df.loc[mask, 'Days Expired'] = days_past_exp if days_past_exp > 0 else 0
+                    m_df.loc[mask, 'Is_Red_Alert'] = days_to_exp <= 90
+                    m_df.loc[mask, 'Is_Yellow_Alert'] = (days_to_exp > 90) and (days_to_exp <= 180)
+                    
+                    if days_to_exp < 0: cat_val = "Expired / Overdue"
+                    elif days_to_exp <= 90: cat_val = "Expiring in < 3 Months"
+                    elif days_to_exp <= 180: cat_val = "Expiring in 3–6 Months"
+                    else: cat_val = "Valid (> 6 Months)"
+                    m_df.loc[mask, 'Expiry_Status_Cat'] = cat_val
 
-    if close_clicked:
-        st.session_state['_last_processed_signal'] = None
-        st.rerun()
+            st.session_state['_last_processed_signal'] = None
+            invalidate_master_cache()
+            st.toast("Contract details updated", icon="✅")
+            st.rerun()
+
+        if close_clicked:
+            st.session_state['_last_processed_signal'] = None
+            st.rerun()
 
 # --- DIALOG 3: CONFIRM DELETE CONTRACT ITEM ---
 @st.dialog("🗑️ Confirm Delete Contract Item", width="medium")
@@ -546,7 +547,7 @@ def delete_contract_dialog(row_data):
                 db.delete_contract(contract_id, user_name=deleter_name.strip())
                 st.session_state['_last_processed_signal'] = None
                 invalidate_master_cache()
-                st.toast(f"🗑️ Contract Item #{contract_id} deleted successfully!", icon="✅")
+                st.toast(f"Contract Item #{contract_id} deleted", icon="🗑️")
                 st.rerun()
     with c_close:
         if st.button("Cancel", use_container_width=True, key=f"btn_cancel_del_{contract_id}"):
@@ -628,9 +629,11 @@ def render_tracker_grid(category_filter, status_filter, search_query):
     with k3: st.markdown(create_kpi_card("Expiring in 3–6 Months", yellow_count, "#fef3c7", "#854d0e", "#fde047", "⚠️"), unsafe_allow_html=True)
     with k4: st.markdown(create_kpi_card("Expiring < 3 Months / Expired", red_count, "#fee2e2", "#991b1b", "#fca5a5", "🚨"), unsafe_allow_html=True)
 
-    st.markdown("<div style='margin-top: 18px; margin-bottom: 12px; clear: both;'></div>", unsafe_allow_html=True)
+    # AMPLE VERTICAL SPACE BETWEEN KPI CARDS AND CONTROL BUTTON BAR
+    st.markdown("<div style='height: 24px; width: 100%; clear: both;'></div>", unsafe_allow_html=True)
 
-    ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([3, 3, 6])
+    # CONTROL BUTTON BAR ALIGNED ON A SINGLE HORIZONTAL BASELINE
+    ctrl_col1, ctrl_col2, ctrl_col3, ctrl_col4 = st.columns([2.5, 2.5, 3.5, 3.5], vertical_alignment="center")
 
     preferred_col_order = [
         'Product code',
@@ -660,7 +663,7 @@ def render_tracker_grid(category_filter, status_filter, search_query):
     all_available_cols = existing_cols + extra_cols
     
     with ctrl_col1:
-        with st.popover("👁️ Select Columns to Display", use_container_width=True):
+        with st.popover("👁️ Select Columns", use_container_width=True):
             st.markdown("**Check/Uncheck Columns to Show in Table:**")
             selected_display_cols = st.multiselect(
                 "Visible Columns:",
@@ -671,7 +674,7 @@ def render_tracker_grid(category_filter, status_filter, search_query):
     with ctrl_col2:
         with st.popover("➕ Add Custom Column", use_container_width=True):
             st.markdown("**Add a New Column to the Database:**")
-            new_col_name = st.text_input("New Column Header (e.g. Delivery Status)")
+            new_col_name = st.text_input("New Column Header")
             if st.button("Save New Column", type="primary", use_container_width=True):
                 if new_col_name.strip():
                     ok, msg = db.add_custom_column(new_col_name.strip())
@@ -683,6 +686,9 @@ def render_tracker_grid(category_filter, status_filter, search_query):
                         st.error(msg)
 
     with ctrl_col3:
+        save_grid_btn = st.button("💾 Save All Grid Changes", type="primary", use_container_width=True)
+
+    with ctrl_col4:
         if not df.empty:
             export_df = df[[c for c in selected_display_cols if c in df.columns]].copy()
             excel_buffer = io.BytesIO()
@@ -690,11 +696,11 @@ def render_tracker_grid(category_filter, status_filter, search_query):
                 export_df.to_excel(writer, index=False, sheet_name='Contracts')
             
             st.download_button(
-                label="📥 Export View to Excel (.xlsx)",
+                label="📥 Export View to Excel",
                 data=excel_buffer.getvalue(),
                 file_name=f"RMS_Contracts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=False
+                use_container_width=True
             )
 
     st.markdown("""
@@ -726,7 +732,8 @@ def render_tracker_grid(category_filter, status_filter, search_query):
         gb.configure_column('Is_Red_Alert', hide=True)
         gb.configure_column('Is_Yellow_Alert', hide=True)
 
-        gb.configure_column('_row_num', header_name='#', headerTooltip='Row Number', width=65, pinned='left', editable=False, valueGetter="node.rowIndex + 1", type=['numericColumn'])
+        # COMPACT ROW NUMBER COLUMN (COMPACT WIDTH FIT UP TO 10000 ROWS)
+        gb.configure_column('_row_num', header_name='#', headerTooltip='Row Number', width=48, minWidth=45, maxWidth=55, pinned='left', editable=False, valueGetter="node.rowIndex + 1", type=['numericColumn'])
 
         # BULLETPROOF JS EVENT DISPATCHER WITH FORCED cellValueChanged EVENT
         js_quick_actions_renderer = JsCode("""
@@ -829,10 +836,34 @@ def render_tracker_grid(category_filter, status_filter, search_query):
         if 'Supplier' in df_display.columns:
             gb.configure_column('Supplier', headerTooltip='Supplier', width=220, minWidth=160)
 
+        # STRICT NUMERIC VALIDATION: ONLY NUMBERS ALLOWED
         if 'Validity Period (Years)' in df_display.columns:
-            gb.configure_column('Validity Period (Years)', header_name='Validity Period (Years)', headerTooltip='Validity Period (Years)', width=150, minWidth=130, editable=True, type=['numericColumn'])
+            gb.configure_column(
+                'Validity Period (Years)', 
+                header_name='Validity Period (Years)', 
+                headerTooltip='Validity Period (Years)', 
+                width=150, 
+                minWidth=130, 
+                editable=True, 
+                type=['numericColumn'], 
+                cellEditor='agNumberCellEditor', 
+                cellEditorParams={'min': 1, 'max': 50, 'precision': 0}
+            )
 
-        # DIRECT EDITABLE COUPLING FOR START & EXPIRY DATES
+        if 'Unit price' in df_display.columns:
+            gb.configure_column(
+                'Unit price', 
+                header_name='Unit price', 
+                headerTooltip='Unit price', 
+                width=140, 
+                minWidth=110, 
+                editable=True, 
+                type=['numericColumn'], 
+                cellEditor='agNumberCellEditor', 
+                cellEditorParams={'min': 0, 'precision': 2}
+            )
+
+        # STRICT DATE VALIDATION VIA HTML5 DATE PICKER
         custom_date_editor = JsCode("class DatePickerEditor { init(params) { this.eInput = document.createElement('input'); this.eInput.type = 'date'; this.eInput.value = params.value || ''; this.eInput.style.width = '100%'; this.eInput.style.height = '100%'; } getGui() { return this.eInput; } afterGuiAttached() { this.eInput.focus(); } getValue() { return this.eInput.value; } }")
 
         if 'Starting date for contract execution (contact signature)' in df_display.columns:
@@ -895,11 +926,76 @@ def render_tracker_grid(category_filter, status_filter, search_query):
         if 'Days Past Expiry' in df_display.columns:
             gb.configure_column('Days Past Expiry', header_name='Days Past Expiry', headerTooltip='Days Past Expiry Status', width=170, minWidth=150, editable=False, cellRenderer=days_past_renderer)
 
+        # INSTANT CLIENT-SIDE JS AUTO-CALCULATION UPON CELL CHANGE (0ms RECOMPUTE)
+        js_cell_value_changed_handler = JsCode("""
+        function(params) {
+            if (!params.data) return;
+            let colId = params.column.getColId();
+            
+            if (colId === 'Starting date for contract execution (contact signature)' || colId === 'Validity Period (Years)') {
+                let startStr = params.data['Starting date for contract execution (contact signature)'];
+                let vYrs = parseInt(params.data['Validity Period (Years)'], 10);
+                if (isNaN(vYrs) || vYrs < 1) vYrs = 1;
+                
+                if (startStr && startStr.trim() !== '' && startStr.toLowerCase() !== 'nan') {
+                    let parts = startStr.split('-');
+                    let sDate = null;
+                    if (parts.length === 3) {
+                        sDate = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
+                    } else {
+                        sDate = new Date(startStr);
+                    }
+                    
+                    if (sDate && !isNaN(sDate.getTime())) {
+                        let expDate = new Date(sDate);
+                        expDate.setFullYear(expDate.getFullYear() + vYrs);
+                        expDate.setDate(expDate.getDate() - 1);
+                        
+                        let yyyy = expDate.getFullYear();
+                        let mm = String(expDate.getMonth() + 1).padStart(2, '0');
+                        let dd = String(expDate.getDate()).padStart(2, '0');
+                        let expStr = yyyy + '-' + mm + '-' + dd;
+                        
+                        params.node.setDataValue('Contract End Date (Expiry)', expStr);
+                        
+                        let today = new Date();
+                        today.setHours(0,0,0,0);
+                        let yrText = 'First year';
+                        if (today >= sDate) {
+                            let yearsDiff = today.getFullYear() - sDate.getFullYear();
+                            let mDiff = today.getMonth() - sDate.getMonth();
+                            if (mDiff < 0 || (mDiff === 0 && today.getDate() < sDate.getDate())) {
+                                yearsDiff--;
+                            }
+                            let yrNum = yearsDiff + 1;
+                            let wordMap = {1:'First year', 2:'Second year', 3:'Third year', 4:'Fourth year', 5:'Fifth year', 6:'Sixth year', 7:'Seventh year', 8:'Eighth year', 9:'Ninth year', 10:'Tenth year'};
+                            yrText = wordMap[yrNum] || ('Year ' + yrNum);
+                        }
+                        params.node.setDataValue('Contract Execution Year', yrText);
+                        
+                        let diffTime = expDate.getTime() - today.getTime();
+                        let diffDays = Math.round(diffTime / (1000 * 3600 * 24));
+                        
+                        params.node.setDataValue('Days_To_Expiry', diffDays);
+                        params.node.setDataValue('Days_Past_Expiry', -diffDays);
+                        params.node.setDataValue('Days Expired', diffDays < 0 ? -diffDays : 0);
+                        params.node.setDataValue('Is_Red_Alert', diffDays <= 90);
+                        params.node.setDataValue('Is_Yellow_Alert', diffDays > 90 && diffDays <= 180);
+                    }
+                }
+            }
+            if (params.api) {
+                params.api.redrawRows({ rowNodes: [params.node] });
+            }
+        }
+        """)
+
         gb.configure_grid_options(
             suppressLoadingOverlay=True,
             rowHeight=48,
             singleClickEdit=True,
             rowBuffer=10,
+            onCellValueChanged=js_cell_value_changed_handler,
             getRowStyle=JsCode("""
             function(params) {
                 if (!params.data) return null;
@@ -984,7 +1080,7 @@ def render_tracker_grid(category_filter, status_filter, search_query):
                                 st.session_state['pending_dialog'] = (cmd, target_row)
                                 st.rerun()
 
-        # UNIVERSAL INLINE CELL EDIT SAVER (PERSISTS ANY CELL EDIT DIRECTLY TO SQLITE)
+        # AUTOMATIC INSTANT SQLITE SYNC IN BACKGROUND (PERMANENT SAVE ON EVERY CELL EDIT)
         if not button_action_triggered and 'data' in grid_response and grid_response['data'] is not None:
             edited_df = grid_response['data']
             if isinstance(edited_df, pd.DataFrame) and not edited_df.empty and 'id' in edited_df.columns:
@@ -1030,7 +1126,6 @@ def render_tracker_grid(category_filter, status_filter, search_query):
                                         except Exception:
                                             master_ref.loc[mask_id, ui_col] = str(new_val)
 
-                                        # AUTOMATIC DATE RECALCULATION UPON INLINE DATE/VALIDITY EDIT
                                         if ui_col in ['Starting date for contract execution (contact signature)', 'Validity Period (Years)', 'Contract End Date (Expiry)']:
                                             row_st = str(master_ref.loc[mask_id, 'Starting date for contract execution (contact signature)'].values[0])
                                             row_v = str(master_ref.loc[mask_id, 'Validity Period (Years)'].values[0])
@@ -1066,9 +1161,12 @@ def render_tracker_grid(category_filter, status_filter, search_query):
                                                 else: cat_val = "Valid (> 6 Months)"
                                                 master_ref.loc[mask_id, 'Expiry_Status_Cat'] = cat_val
 
-                                        invalidate_master_cache()
-                                        st.toast(f"✅ Item #{db_id} updated: {ui_col}", icon="💾")
-                                        st.rerun()
+                            cached_load_and_process_master.clear()
+
+        # EXPLICIT BULK SAVE BACKUP BUTTON HANDLER
+        if save_grid_btn:
+            invalidate_master_cache()
+            st.toast("✅ All grid changes committed to database!", icon="💾")
 
 # ==========================================
 # TAB 1: MASTER CONTRACT TRACKER

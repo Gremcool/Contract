@@ -1,3 +1,6 @@
 *.db
 *.sqlite3
 tender_tracker.db
+*.db-wal
+*.db-shm
+pycache/
