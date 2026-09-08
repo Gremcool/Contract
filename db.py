@@ -4,10 +4,10 @@ from datetime import datetime
 import os
 import re
 
-# PERSISTENT DB PATH: Uses Railway volume mounted path if defined, falls back to local tender_tracker.db
+# PERSISTENT DB PATH: Uses Railway volume path if defined, falls back to tender_tracker.db[cite: 4]
 DB_FILE = os.getenv("DB_PATH", "tender_tracker.db")
 
-# Automatically create the target directory if DB_PATH includes subfolders (e.g., /app/data/tender_tracker.db)
+# Automatically create target directory if DB_PATH includes subfolders[cite: 4]
 if os.path.dirname(DB_FILE):
     os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
 
@@ -49,11 +49,37 @@ def init_db():
         )
     """)
 
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_contracts_prodcode ON contracts([Product code]);")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_contracts_supplier ON contracts([Supplier]);")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_contracts_category ON contracts([Category]);")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_contracts_officer ON contracts([PROCUREMENT OFFICER]);")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_contracts_fw_ref ON contracts([Ref/N° of Framework Agreement]);")
+    # Inspect existing columns to upgrade older database schemas
+    cursor.execute("PRAGMA table_info(contracts);")
+    existing_cols = [row[1] for row in cursor.fetchall()]
+
+    required_cols = [
+        'Product code', 'Product Description', 'Unit price', 'Currency',
+        'pack size', 'Incoterm', 'Supplier', 'Manufacturer and country of origin',
+        'Starting date for contract execution (contact signature)',
+        'Validity Period (Years)', 'Contract End Date (Expiry)',
+        'Contract Execution Year', 'Delivey period',
+        'Ref/N° of Framework Agreement', 'Title of the contract',
+        "Manufacturer's addresses", 'Category', 'PROCUREMENT OFFICER',
+        'CLEANING ACTION'
+    ]
+
+    for col in required_cols:
+        if col not in existing_cols:
+            try:
+                cursor.execute(f"ALTER TABLE contracts ADD COLUMN [{col}] TEXT;")
+            except Exception:
+                pass
+
+    # Safely build database indexes
+    try:
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_contracts_prodcode ON contracts([Product code]);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_contracts_supplier ON contracts([Supplier]);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_contracts_category ON contracts([Category]);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_contracts_officer ON contracts([PROCUREMENT OFFICER]);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_contracts_fw_ref ON contracts([Ref/N° of Framework Agreement]);")
+    except Exception as e:
+        print("Index creation skipped:", e)
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS row_documents (
