@@ -4,10 +4,10 @@ from datetime import datetime
 import os
 import re
 
-# PERSISTENT DB PATH: Uses Railway volume mounted path if defined, falls back to local contracts.db
-DB_FILE = os.getenv("DB_PATH", "contracts.db")
+# PERSISTENT DB PATH: Uses Railway volume mounted path if defined, falls back to local tender_tracker.db
+DB_FILE = os.getenv("DB_PATH", "tender_tracker.db")
 
-# Automatically create the target directory if DB_PATH includes subfolders (e.g., /app/data/contracts.db)
+# Automatically create the target directory if DB_PATH includes subfolders (e.g., /app/data/tender_tracker.db)
 if os.path.dirname(DB_FILE):
     os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
 
