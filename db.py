@@ -1,697 +1,362 @@
 import sqlite3
 import pandas as pd
-import numpy as np
-import os
-import warnings
 from datetime import datetime
-import streamlit as st
+import os
+import re
 
-DB_FILE = os.getenv("DATABASE_PATH", "tender_tracker.db")
+# PERSISTENT DB PATH: Uses Railway volume mounted path if defined, falls back to local contracts.db
+DB_FILE = os.getenv("DB_PATH", "contracts.db")
 
-# Exact 1:1 mapping matching original Excel headers
-COLUMN_MAPPING = {
-    'category': 'Category',
-    'product_code': 'Product code',
-    'product_description': 'Product Description',
-    'pack_size': 'pack size',
-    'currency': 'Currency',
-    'unit_price': 'Unit price',
-    'incoterm': 'Incoterm',
-    'manufacturer_origin': 'Manufacturer and country of origin',
-    'manufacturer_address': "Manufacturer's addresses",
-    'supplier': 'Supplier',
-    'ref_framework': 'Ref/N° of Framework Agreement',
-    'title_contract': 'Title of the contract',
-    'delivery_period': 'Delivey period',
-    'starting_date': 'Starting date for contract execution (contact signature)',
-    'expiry_date': 'Contract End Date (Expiry)',
-    'validity_period': 'Validity Period (Years)',
-    'contract_year': 'Contract Execution Year',
-    'procurement_officer': 'PROCUREMENT OFFICER',
-    'cleaning_action': 'CLEANING ACTION'
-}
+# Automatically create the target directory if DB_PATH includes subfolders (e.g., /app/data/contracts.db)
+if os.path.dirname(DB_FILE):
+    os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
 
-REVERSE_MAPPING = {v: k for k, v in COLUMN_MAPPING.items()}
-
-def get_db_col_name(ui_col):
-    """Robustly maps any UI column name (case & whitespace insensitive) to SQLite DB column name."""
-    if ui_col in REVERSE_MAPPING:
-        return REVERSE_MAPPING[ui_col]
-    
-    ui_clean = str(ui_col).strip().lower()
-    for k, v in REVERSE_MAPPING.items():
-        if k.strip().lower() == ui_clean:
-            return v
-            
-    for db_col in COLUMN_MAPPING.keys():
-        if db_col.lower() == ui_clean:
-            return db_col
-            
-    alias_map = {
-        'delivery period': 'delivery_period',
-        'delivey period': 'delivery_period',
-        'procurement officer': 'procurement_officer',
-        'title of contract': 'title_contract',
-        'title of the contract': 'title_contract',
-        'product description': 'product_description',
-        'product code': 'product_code',
-        'validity period': 'validity_period',
-        'validity period (years)': 'validity_period',
-        'contract execution year': 'contract_year',
-        'contract year': 'contract_year',
-        'execution year': 'contract_year',
-        'manufacturer address': 'manufacturer_address',
-        "manufacturer's addresses": 'manufacturer_address',
-        'manufacturer and country of origin': 'manufacturer_origin',
-        'category': 'category',
-        'sheet': 'category',
-        'incoterm': 'incoterm',
-        'supplier': 'supplier',
-        'end_user': 'end_user',
-        'demandor': 'end_user',
-        'demandor (end user)': 'end_user',
-        'budget_holder': 'budget_holder',
-        'budget holder': 'budget_holder',
-        'classification': 'classification'
-    }
-    return alias_map.get(ui_clean, ui_col)
-
-def get_conn():
-    db_dir = os.path.dirname(DB_FILE)
-    if db_dir and not os.path.exists(db_dir):
-        os.makedirs(db_dir, exist_ok=True)
-    conn = sqlite3.connect(DB_FILE, timeout=60, check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL;")
+def get_connection():
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode = WAL;")
     conn.execute("PRAGMA synchronous = NORMAL;")
-    conn.execute("PRAGMA mmap_size = 30000000000;")
-    conn.execute("PRAGMA cache_size = -64000;")
-    conn.execute("PRAGMA busy_timeout=60000;")
+    conn.execute("PRAGMA cache_size = -64000;")  # 64MB RAM Cache
+    conn.execute("PRAGMA temp_store = MEMORY;")
     return conn
 
-def log_action_cursor(cursor, message):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    cursor.execute("INSERT INTO logs (timestamp, message) VALUES (?, ?)", (timestamp, message))
-
-def cleanup_database_duplicates():
-    """Purges duplicate contract entries matching core product identity, retaining MAX(id)."""
-    conn = get_conn()
-    try:
-        c = conn.cursor()
-        c.execute('''
-            DELETE FROM contracts
-            WHERE id NOT IN (
-                SELECT MAX(id)
-                FROM contracts
-                WHERE is_deleted = 0 OR is_deleted IS NULL
-                GROUP BY 
-                    LOWER(TRIM(COALESCE(category, ''))),
-                    LOWER(TRIM(COALESCE(product_code, ''))),
-                    LOWER(TRIM(COALESCE(product_description, ''))),
-                    LOWER(TRIM(COALESCE(pack_size, ''))),
-                    LOWER(TRIM(COALESCE(supplier, ''))),
-                    LOWER(TRIM(COALESCE(ref_framework, '')))
-            ) AND (is_deleted = 0 OR is_deleted IS NULL);
-        ''')
-        conn.commit()
-    except Exception:
-        pass
-    finally:
-        conn.close()
-
 def init_db():
-    conn = get_conn()
-    try:
-        c = conn.cursor()
-        
-        # 1. Master Contracts Table
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS contracts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                category TEXT,
-                no TEXT,
-                product_code TEXT,
-                product_description TEXT,
-                pack_size TEXT,
-                classification TEXT,
-                currency TEXT,
-                unit_price REAL,
-                incoterm TEXT,
-                manufacturer_origin TEXT,
-                manufacturer_address TEXT,
-                supplier TEXT,
-                ref_framework TEXT,
-                framework_ref TEXT,
-                title_contract TEXT,
-                contract_title TEXT,
-                delivery_period TEXT,
-                starting_date TEXT,
-                expiry_date TEXT,
-                validity_period INTEGER DEFAULT 1,
-                contract_year TEXT,
-                end_user TEXT,
-                budget_holder TEXT,
-                procurement_officer TEXT,
-                cleaning_action TEXT,
-                is_deleted INTEGER DEFAULT 0,
-                deleted_by TEXT,
-                deleted_at TEXT
-            )
-        ''')
+    conn = get_connection()
+    cursor = conn.cursor()
 
-        # 2. AUTOMATIC SCHEMA MIGRATION FOR EXISTING DB FILES
-        c.execute("PRAGMA table_info(contracts)")
-        existing_cols = [r[1] for r in c.fetchall()]
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS contracts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            [Product code] TEXT,
+            [Product Description] TEXT,
+            [Unit price] TEXT,
+            [Currency] TEXT,
+            [pack size] TEXT,
+            [Incoterm] TEXT,
+            [Supplier] TEXT,
+            [Manufacturer and country of origin] TEXT,
+            [Starting date for contract execution (contact signature)] TEXT,
+            [Validity Period (Years)] TEXT,
+            [Contract End Date (Expiry)] TEXT,
+            [Contract Execution Year] TEXT,
+            [Delivey period] TEXT,
+            [Ref/N° of Framework Agreement] TEXT,
+            [Title of the contract] TEXT,
+            [Manufacturer's addresses] TEXT,
+            [Category] TEXT,
+            [PROCUREMENT OFFICER] TEXT,
+            [CLEANING ACTION] TEXT
+        )
+    """)
 
-        required_cols = {
-            'category': 'TEXT', 'no': 'TEXT', 'product_code': 'TEXT',
-            'product_description': 'TEXT', 'pack_size': 'TEXT', 'classification': 'TEXT',
-            'currency': 'TEXT', 'unit_price': 'REAL', 'incoterm': 'TEXT',
-            'manufacturer_origin': 'TEXT', 'manufacturer_address': 'TEXT',
-            'supplier': 'TEXT', 'ref_framework': 'TEXT', 'framework_ref': 'TEXT',
-            'title_contract': 'TEXT', 'contract_title': 'TEXT', 'delivery_period': 'TEXT',
-            'starting_date': 'TEXT', 'expiry_date': 'TEXT', 'validity_period': 'INTEGER DEFAULT 1',
-            'contract_year': 'TEXT', 'end_user': 'TEXT', 'budget_holder': 'TEXT',
-            'procurement_officer': 'TEXT', 'cleaning_action': 'TEXT',
-            'is_deleted': 'INTEGER DEFAULT 0', 'deleted_by': 'TEXT', 'deleted_at': 'TEXT'
-        }
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_contracts_prodcode ON contracts([Product code]);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_contracts_supplier ON contracts([Supplier]);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_contracts_category ON contracts([Category]);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_contracts_officer ON contracts([PROCUREMENT OFFICER]);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_contracts_fw_ref ON contracts([Ref/N° of Framework Agreement]);")
 
-        for col, col_type in required_cols.items():
-            if col not in existing_cols:
-                try:
-                    c.execute(f'ALTER TABLE contracts ADD COLUMN {col} {col_type}')
-                except sqlite3.OperationalError:
-                    pass
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS row_documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            contract_id INTEGER,
+            doc_number INTEGER,
+            file_name TEXT,
+            file_type TEXT,
+            file_data BLOB,
+            uploaded_by TEXT,
+            uploaded_at TEXT
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_docs_contract_id ON row_documents(contract_id);")
 
-        # Sync framework_ref / ref_framework
-        if 'framework_ref' in existing_cols and 'ref_framework' in existing_cols:
-            try:
-                c.execute("UPDATE contracts SET ref_framework = framework_ref WHERE (ref_framework IS NULL OR ref_framework = '') AND framework_ref IS NOT NULL AND framework_ref != ''")
-                c.execute("UPDATE contracts SET framework_ref = ref_framework WHERE (framework_ref IS NULL OR framework_ref = '') AND framework_ref IS NOT NULL AND framework_ref != ''")
-            except sqlite3.OperationalError:
-                pass
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS row_change_trail (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            contract_id INTEGER,
+            field_name TEXT,
+            old_value TEXT,
+            new_value TEXT,
+            updated_by TEXT,
+            updated_at TEXT
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_trail_contract_id ON row_change_trail(contract_id);")
 
-        # Sync contract_title into title_contract
-        if 'contract_title' in existing_cols and 'title_contract' in existing_cols:
-            try:
-                c.execute("UPDATE contracts SET title_contract = contract_title WHERE (title_contract IS NULL OR title_contract = '') AND contract_title IS NOT NULL AND contract_title != ''")
-            except sqlite3.OperationalError:
-                pass
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS rms_emails (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            email TEXT NOT NULL UNIQUE,
+            department TEXT,
+            role TEXT
+        )
+    """)
 
-        # 3. RMS Emails Directory
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS rms_emails (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT,
-                email TEXT UNIQUE,
-                department TEXT,
-                role TEXT,
-                created_at TEXT
-            )
-        ''')
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS global_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            action TEXT,
+            timestamp TEXT
+        )
+    """)
 
-        c.execute("SELECT COUNT(*) FROM rms_emails")
-        if c.fetchone()[0] == 0:
-            c.executemany('''
-                INSERT INTO rms_emails (name, email, department, role, created_at)
-                VALUES (?, ?, ?, ?, ?)
-            ''', [
-                ('RMS Logistics & Inventory', 'logistics@rms.rw', 'Logistics', 'Officer', datetime.now().strftime("%Y-%m-%d")),
-                ('RMS Pharmacy Division', 'pharmacy@rms.rw', 'Pharmacy', 'Head', datetime.now().strftime("%Y-%m-%d")),
-                ('RMS Procurement Office', 'procurement@rms.rw', 'Procurement', 'Manager', datetime.now().strftime("%Y-%m-%d")),
-                ('RMS Quality Control', 'qa@rms.rw', 'Quality Assurance', 'Inspector', datetime.now().strftime("%Y-%m-%d"))
-            ])
-
-        # 4. Documents attached to contract rows
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS row_documents (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                contract_id INTEGER,
-                doc_number INTEGER,
-                file_name TEXT,
-                file_type TEXT,
-                file_size INTEGER,
-                file_data BLOB,
-                uploaded_by TEXT,
-                uploaded_at TEXT
-            )
-        ''')
-
-        # 5. Audit Trail
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS row_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                contract_id INTEGER,
-                user_name TEXT,
-                field_changed TEXT,
-                old_value TEXT,
-                new_value TEXT,
-                timestamp TEXT
-            )
-        ''')
-
-        # 6. Global System logs
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT,
-                message TEXT
-            )
-        ''')
-
-        # 7. PERFORMANCE INDEXES FOR ULTRA-FAST QUERIES
-        c.execute("CREATE INDEX IF NOT EXISTS idx_contracts_active ON contracts(is_deleted, category);")
-        c.execute("CREATE INDEX IF NOT EXISTS idx_contracts_pdesc ON contracts(product_description);")
-        c.execute("CREATE INDEX IF NOT EXISTS idx_contracts_lower_desc ON contracts(LOWER(TRIM(product_description)));")
-        c.execute("CREATE INDEX IF NOT EXISTS idx_contracts_cat_active ON contracts(category, is_deleted);")
-        c.execute("CREATE INDEX IF NOT EXISTS idx_row_docs_cid ON row_documents(contract_id);")
-        c.execute("CREATE INDEX IF NOT EXISTS idx_row_logs_cid ON row_logs(contract_id);")
-
-        conn.commit()
-    finally:
-        conn.close()
-
-    # Automatic one-time cleanup of production duplicates on boot
-    cleanup_database_duplicates()
-
-def add_custom_column(col_name):
-    conn = get_conn()
-    try:
-        c = conn.cursor()
-        c.execute(f'ALTER TABLE contracts ADD COLUMN "{col_name}" TEXT')
-        log_action_cursor(c, f"➕ Added custom column: '{col_name}'")
-        conn.commit()
-        st.session_state['needs_db_reload'] = True
-        return True, f"Column '{col_name}' added successfully!"
-    except sqlite3.OperationalError:
-        return False, f"Column '{col_name}' already exists or name is invalid."
-    finally:
-        conn.close()
+    conn.commit()
+    conn.close()
 
 def load_contracts_direct():
-    """Loads all active records from SQLite into memory fast."""
-    conn = get_conn()
-    try:
-        c = conn.cursor()
-        c.execute("SELECT * FROM contracts WHERE (is_deleted = 0 OR is_deleted IS NULL) ORDER BY id ASC")
-        data = c.fetchall()
-        columns = [desc[0] for desc in c.description] if c.description else []
-    finally:
-        conn.close()
-
-    df = pd.DataFrame(data, columns=columns)
-    if not df.empty:
-        df.rename(columns=COLUMN_MAPPING, inplace=True)
-        df.drop(columns=['no', 'NO', 'item_no', 'classification', 'Classification', 'end_user', 'Demandor (End user)', 'budget_holder', 'Budget Holder', 'is_deleted', 'deleted_by', 'deleted_at', 'framework_ref', 'contract_title', 'Answer', 'answer'], errors='ignore', inplace=True)
-        
-        if 'Product code' in df.columns:
-            df['Product code'] = df['Product code'].astype(str).str.replace(r'\.0$', '', regex=True).replace(['nan', 'None', '<NA>'], '')
-
-        # DEDUPLICATE: RETAIN LATEST EDITED ROW (HIGHEST ID) FOR MATCHING ITEMS
-        dedup_cols = ['Category', 'Product code', 'Product Description', 'pack size', 'Supplier', 'Ref/N° of Framework Agreement']
-        existing_dedup = [c for c in dedup_cols if c in df.columns]
-        if existing_dedup:
-            df = df.sort_values(by='id', ascending=True).groupby(existing_dedup, as_index=False, dropna=False).last()
-
-        # FAST SORT BY PRODUCT DESCRIPTION
-        if 'Product Description' in df.columns:
-            s_clean = df['Product Description'].astype(str).str.strip()
-            first_char = s_clean.str[0].str.lower()
-            is_alpha = first_char.str.contains(r'^[a-z]$', regex=True, na=False)
-            is_digit = first_char.str.contains(r'^[0-9]$', regex=True, na=False)
-            df['_sort_priority'] = np.where(is_alpha, 1, np.where(is_digit, 2, 3))
-            df['_sort_key'] = s_clean.str.lower()
-            df.sort_values(by=['_sort_priority', '_sort_key'], ascending=[True, True], inplace=True)
-            df.drop(columns=['_sort_priority', '_sort_key'], inplace=True)
-            df.reset_index(drop=True, inplace=True)
-
+    conn = get_connection()
+    df = pd.read_sql_query("SELECT * FROM contracts ORDER BY id ASC", conn)
+    conn.close()
     return df
 
 def get_unique_categories():
-    conn = get_conn()
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT DISTINCT Category FROM contracts WHERE Category IS NOT NULL AND Category != ''")
+    rows = cursor.fetchall()
+    conn.close()
+    cats = [r[0] for r in rows]
+    return ["All"] + sorted(cats)
+
+def get_db_col_name(ui_col_name):
+    return ui_col_name
+
+def add_custom_column(col_name):
+    col_clean = col_name.strip()
+    conn = get_connection()
+    cursor = conn.cursor()
     try:
-        c = conn.cursor()
-        c.execute("SELECT DISTINCT category FROM contracts WHERE (is_deleted = 0 OR is_deleted IS NULL) AND category IS NOT NULL AND TRIM(category) != '' ORDER BY category ASC")
-        rows = c.fetchall()
-        cats = [r[0].strip() for r in rows if r[0] and r[0].strip()]
-        defaults = ["Medicines", "Consumables", "Laboratory", "IMPLANTS_"]
-        for d in defaults:
-            if d not in cats: cats.append(d)
-        
-        cats = [c for c in cats if c != "All"]
-        return ["All"] + cats
+        cursor.execute(f"ALTER TABLE contracts ADD COLUMN [{col_clean}] TEXT;")
+        conn.commit()
+        log_action(f"➕ Added custom column: {col_clean}")
+        return True, f"Column '{col_clean}' added successfully!"
+    except sqlite3.OperationalError as e:
+        return False, f"Column error: {str(e)}"
     finally:
         conn.close()
 
-def update_single_cell(contract_id, ui_col_name, new_val, user_name="Admin"):
-    conn = get_conn()
-    try:
-        c = conn.cursor()
-        
-        c.execute("PRAGMA table_info(contracts)")
-        valid_db_cols = set(r[1] for r in c.fetchall())
-        
-        db_col_name = get_db_col_name(ui_col_name)
-        if db_col_name not in valid_db_cols:
-            return
-        
-        c.execute(f'SELECT "{db_col_name}", starting_date, validity_period, expiry_date FROM contracts WHERE id = ?', (contract_id,))
-        res = c.fetchone()
-        old_val = str(res[0]) if res and res[0] is not None else ""
-        cur_start = res[1] if res else ""
-        cur_val = res[2] if res and res[2] else 1
+def update_single_cell(contract_id, col_name, new_val, user_name="Admin Officer"):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(f"SELECT [{col_name}] FROM contracts WHERE id = ?", (contract_id,))
+    row = cursor.fetchone()
+    old_val = row[0] if row else ""
 
-        clean_val = str(new_val).strip() if pd.notna(new_val) else ""
-        if old_val != clean_val:
-            query = f'UPDATE contracts SET "{db_col_name}" = ? WHERE id = ?'
-            c.execute(query, (clean_val, contract_id))
-            
-            # AUTOMATICALLY RECALCULATE EXPIRY DATE IF VALIDITY PERIOD OR START DATE CHANGED
-            if db_col_name in ['starting_date', 'validity_period']:
-                st_date = clean_val if db_col_name == 'starting_date' else cur_start
-                try: val_yrs = int(clean_val) if db_col_name == 'validity_period' else int(cur_val)
-                except: val_yrs = 1
+    cursor.execute(f"UPDATE contracts SET [{col_name}] = ? WHERE id = ?", (str(new_val), contract_id))
+    
+    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    cursor.execute("""
+        INSERT INTO row_change_trail (contract_id, field_name, old_value, new_value, updated_by, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (contract_id, col_name, str(old_val), str(new_val), user_name, now_str))
+    
+    conn.commit()
+    conn.close()
+    log_action(f"✏️ Updated Item #{contract_id} field [{col_name}] to '{new_val}'", user_name)
 
-                st_dt = pd.to_datetime(st_date, errors='coerce')
-                if pd.notna(st_dt):
-                    calc_exp = (st_dt + pd.DateOffset(years=val_yrs) - pd.Timedelta(days=1)).strftime('%Y-%m-%d')
-                    c.execute('UPDATE contracts SET expiry_date = ? WHERE id = ?', (calc_exp, contract_id))
+def update_full_contract(contract_id, updated_fields, user_name="Admin Officer"):
+    conn = get_connection()
+    cursor = conn.cursor()
+    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-            if db_col_name == 'ref_framework':
-                c.execute('UPDATE contracts SET framework_ref = ? WHERE id = ?', (clean_val, contract_id))
-            elif db_col_name == 'title_contract':
-                c.execute('UPDATE contracts SET contract_title = ? WHERE id = ?', (clean_val, contract_id))
-                
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            c.execute('''
-                INSERT INTO row_logs (contract_id, user_name, field_changed, old_value, new_value, timestamp)
+    for col_name, new_val in updated_fields.items():
+        cursor.execute(f"SELECT [{col_name}] FROM contracts WHERE id = ?", (contract_id,))
+        row = cursor.fetchone()
+        old_val = row[0] if row else ""
+
+        if str(old_val).strip() != str(new_val).strip():
+            cursor.execute(f"UPDATE contracts SET [{col_name}] = ? WHERE id = ?", (str(new_val), contract_id))
+            cursor.execute("""
+                INSERT INTO row_change_trail (contract_id, field_name, old_value, new_value, updated_by, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?)
-            ''', (contract_id, user_name, COLUMN_MAPPING.get(db_col_name, ui_col_name), old_val, clean_val, timestamp))
-            
-            log_action_cursor(c, f"✏️ Cell '{db_col_name}' updated on Item #{contract_id} by {user_name}")
-            
-        conn.commit()
-        st.session_state['needs_db_reload'] = True
-    finally:
-        conn.close()
+            """, (contract_id, col_name, str(old_val), str(new_val), user_name, now_str))
 
-def update_full_contract(contract_id, row_dict, user_name="Admin"):
-    conn = get_conn()
-    try:
-        c = conn.cursor()
-        
-        c.execute("PRAGMA table_info(contracts)")
-        valid_db_cols = set(r[1] for r in c.fetchall())
-        
-        # Recalculate expiry date if starting date or validity period updated
-        st_date_input = row_dict.get('Starting date for contract execution (contact signature)', None)
-        val_yrs_input = row_dict.get('Validity Period (Years)', None)
+    conn.commit()
+    conn.close()
+    log_action(f"📝 Full edit saved for Contract Item #{contract_id}", user_name)
 
-        if st_date_input is not None and val_yrs_input is not None:
-            try:
-                v_yrs = int(val_yrs_input)
-                st_dt = pd.to_datetime(st_date_input, errors='coerce')
-                if pd.notna(st_dt):
-                    row_dict['Contract End Date (Expiry)'] = (st_dt + pd.DateOffset(years=v_yrs) - pd.Timedelta(days=1)).strftime('%Y-%m-%d')
-            except Exception:
-                pass
-
-        for ui_col, new_val in row_dict.items():
-            db_col = get_db_col_name(ui_col)
-            if db_col not in valid_db_cols or db_col in ['id', 'is_deleted', 'deleted_by', 'deleted_at']: 
-                continue
-            
-            c.execute(f'SELECT "{db_col}" FROM contracts WHERE id = ?', (contract_id,))
-            res = c.fetchone()
-            old_val = str(res[0]) if res and res[0] is not None else ""
-            
-            clean_new_val = str(new_val).strip() if pd.notna(new_val) else ""
-            if old_val != clean_new_val:
-                query = f'UPDATE contracts SET "{db_col}" = ? WHERE id = ?'
-                c.execute(query, (clean_new_val, contract_id))
-                
-                if db_col == 'ref_framework':
-                    c.execute('UPDATE contracts SET framework_ref = ? WHERE id = ?', (clean_new_val, contract_id))
-                elif db_col == 'title_contract':
-                    c.execute('UPDATE contracts SET contract_title = ? WHERE id = ?', (clean_new_val, contract_id))
-
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                c.execute('''
-                    INSERT INTO row_logs (contract_id, user_name, field_changed, old_value, new_value, timestamp)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ''', (contract_id, user_name, COLUMN_MAPPING.get(db_col, ui_col), old_val, clean_new_val, timestamp))
-
-        log_action_cursor(c, f"✏️ Full updates saved for Contract Item #{contract_id} by {user_name}")
-        conn.commit()
-        st.session_state['needs_db_reload'] = True
-    finally:
-        conn.close()
-
-def delete_contract(contract_id, user_name):
-    conn = get_conn()
-    try:
-        c = conn.cursor()
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        c.execute("UPDATE contracts SET is_deleted = 1, deleted_by = ?, deleted_at = ? WHERE id = ?", (user_name, timestamp, contract_id))
-        log_action_cursor(c, f"🗑️ Contract Item #{contract_id} deleted by {user_name}")
-        conn.commit()
-        st.session_state['needs_db_reload'] = True
-    finally:
-        conn.close()
-
-def get_field_val(row, *aliases):
-    for alias in aliases:
-        for col in row.index:
-            if str(col).strip().lower() == str(alias).strip().lower():
-                val = row[col]
-                if pd.notna(val):
-                    if isinstance(val, (pd.Timestamp, datetime)):
-                        return val.strftime('%Y-%m-%d')
-                    return str(val).strip()
-    return ""
-
-def import_excel_master(file_or_path):
-    filename = str(getattr(file_or_path, 'name', file_or_path)).lower()
-    if not (filename.endswith('.xlsx') or filename.endswith('.xls')):
-        return False, "Unsupported file format. Please upload a valid Microsoft Excel file (.xlsx or .xls)."
-
-    conn = get_conn()
-    try:
-        xls = pd.ExcelFile(file_or_path)
-        c = conn.cursor()
-        total_imported = 0
-        for sheet in xls.sheet_names:
-            df = pd.read_excel(xls, sheet_name=sheet)
-            df.dropna(how='all', inplace=True)
-            df.drop_duplicates(inplace=True)
-            
-            rows_to_insert = []
-            for idx, row in df.iterrows():
-                item_no = get_field_val(row, 'NO', '#')
-                
-                p_code = get_field_val(row, 'Product code', 'Code')
-                if p_code.endswith('.0'): p_code = p_code[:-2]
-
-                desc = get_field_val(row, 'Product Description', 'Product description', 'Description')
-                pack_size = get_field_val(row, 'pack size', 'Pack Size')
-                classif = get_field_val(row, 'General medicines/Specialised/Oncology', 'Classification')
-                currency = get_field_val(row, 'Currency')
-                
-                u_price_raw = get_field_val(row, 'Unit price', 'Unit Price')
-                try: u_price = float(u_price_raw) if u_price_raw else None
-                except: u_price = None
-
-                incoterm = get_field_val(row, 'Incoterm')
-                m_origin = get_field_val(row, 'Manufacturer and country of origin')
-                m_addr = get_field_val(row, "Manufacturer's addresses", "Manufacturer address")
-                supplier = get_field_val(row, 'Supplier', 'os')
-                fw_ref = get_field_val(row, 'Ref/N° of Framework Agreement', 'Framework Agreement Ref')
-                contract_title = get_field_val(row, 'Title of the contract', 'Contract Title')
-                deliv = get_field_val(row, 'Delivey period', 'Delivery period')
-                
-                start_date_raw = get_field_val(row, 'Starting date for contract execution (contact signature)')
-                start_dt = pd.to_datetime(start_date_raw, errors='coerce', format='mixed')
-                start_date = start_dt.strftime('%Y-%m-%d') if pd.notna(start_dt) else start_date_raw
-
-                expiry_date_raw = get_field_val(row, 'Contract End Date (Expiry)', 'Contract end date', 'Expiry date', 'End date', 'Expiry')
-                exp_dt = pd.to_datetime(expiry_date_raw, errors='coerce', format='mixed')
-                expiry_date = exp_dt.strftime('%Y-%m-%d') if pd.notna(exp_dt) else expiry_date_raw
-
-                contract_year = get_field_val(row, 'Contract Execution Year', 'Contract Year', 'Execution Year', 'Unnamed: 18', 'Unnamed: 17')
-
-                end_user = get_field_val(row, 'Demandor (End user)', 'End user', 'Demandor')
-                budget = get_field_val(row, 'Budget Holder')
-                officer = get_field_val(row, 'PROCUREMENT OFFICER', 'Procurement Officer')
-                clean_act = get_field_val(row, 'CLEANING ACTION')
-
-                row_tuple = (
-                    str(sheet).strip(), item_no, p_code, desc, pack_size, classif, currency, u_price,
-                    incoterm, m_origin, m_addr, supplier, fw_ref, fw_ref, contract_title, contract_title, deliv, start_date,
-                    expiry_date, 1, contract_year, end_user, budget, officer, clean_act, 0, None, None
-                )
-                rows_to_insert.append(row_tuple)
-
-            c.executemany('''
-                INSERT INTO contracts (
-                    category, no, product_code, product_description, pack_size,
-                    classification, currency, unit_price, incoterm, manufacturer_origin,
-                    manufacturer_address, supplier, ref_framework, framework_ref, title_contract, contract_title,
-                    delivery_period, starting_date, expiry_date, validity_period, contract_year, end_user, budget_holder, procurement_officer,
-                    cleaning_action, is_deleted, deleted_by, deleted_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', rows_to_insert)
-            total_imported += len(rows_to_insert)
-
-        log_action_cursor(c, f"📁 Master Excel Imported: {total_imported} records across {len(xls.sheet_names)} sheets.")
-        conn.commit()
-        st.session_state['needs_db_reload'] = True
-    except Exception as e:
-        return False, f"Error processing Excel file: {str(e)}"
-    finally:
-        conn.close()
-
-    cleanup_database_duplicates()
-    return True, total_imported
+def delete_contract(contract_id, user_name="Admin Officer"):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM contracts WHERE id = ?", (contract_id,))
+    cursor.execute("DELETE FROM row_documents WHERE contract_id = ?", (contract_id,))
+    cursor.execute("DELETE FROM row_change_trail WHERE contract_id = ?", (contract_id,))
+    conn.commit()
+    conn.close()
+    log_action(f"🗑️ Deleted Contract Item #{contract_id}", user_name)
 
 def get_rms_emails():
-    conn = get_conn()
-    try:
-        c = conn.cursor()
-        c.execute("SELECT id, name, email, department, role FROM rms_emails ORDER BY name ASC")
-        rows = c.fetchall()
-    finally:
-        conn.close()
-    return pd.DataFrame(rows, columns=['ID', 'Name', 'Email', 'Department', 'Role'])
+    conn = get_connection()
+    df = pd.read_sql_query("SELECT id as ID, name as Name, email as Email, department as Department, role as Role FROM rms_emails", conn)
+    conn.close()
+    return df
 
-def add_rms_email(name, email, department, role):
-    conn = get_conn()
+def add_rms_email(name, email, department="Procurement", role="Officer"):
+    conn = get_connection()
+    cursor = conn.cursor()
     try:
-        c = conn.cursor()
-        created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        c.execute("INSERT INTO rms_emails (name, email, department, role, created_at) VALUES (?, ?, ?, ?, ?)",
-                  (name, email, department, role, created_at))
-        log_action_cursor(c, f"📧 Added RMS Email recipient: {email} ({name})")
+        cursor.execute("INSERT INTO rms_emails (name, email, department, role) VALUES (?, ?, ?, ?)", (name, email, department, role))
         conn.commit()
-        return True, "Email successfully registered!"
+        log_action(f"📧 Registered RMS email: {email}")
+        return True, "Email registered successfully!"
     except sqlite3.IntegrityError:
         return False, "This email address is already registered."
     finally:
         conn.close()
 
 def delete_rms_email(email_id):
-    conn = get_conn()
-    try:
-        c = conn.cursor()
-        c.execute("DELETE FROM rms_emails WHERE id = ?", (email_id,))
-        log_action_cursor(c, f"📧 Deleted RMS Email ID: {email_id}")
-        conn.commit()
-    finally:
-        conn.close()
-
-def save_row_documents(contract_id, uploaded_files, uploader_name):
-    conn = get_conn()
-    try:
-        c = conn.cursor()
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        saved_count = 0
-        
-        for f in uploaded_files:
-            c.execute("SELECT MAX(doc_number) FROM row_documents WHERE contract_id = ?", (contract_id,))
-            res = c.fetchone()
-            max_num = res[0] if res else None
-            next_doc_num = 1 if max_num is None else max_num + 1
-
-            file_bytes = f.getvalue() if hasattr(f, 'getvalue') else f.read()
-            
-            c.execute('''
-                INSERT INTO row_documents (contract_id, doc_number, file_name, file_type, file_size, file_data, uploaded_by, uploaded_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (contract_id, next_doc_num, f.name, f.type, len(file_bytes), file_bytes, uploader_name, timestamp))
-            
-            c.execute('''
-                INSERT INTO row_logs (contract_id, user_name, field_changed, old_value, new_value, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (contract_id, uploader_name, "Document Attached", "-", f"Doc #{next_doc_num}: {f.name}", timestamp))
-
-            log_action_cursor(c, f"📁 Doc #{next_doc_num} ('{f.name}') uploaded by '{uploader_name}' for Item #{contract_id}")
-            saved_count += 1
-        
-        conn.commit()
-        return saved_count
-    finally:
-        conn.close()
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM rms_emails WHERE id = ?", (email_id,))
+    conn.commit()
+    conn.close()
+    log_action(f"🗑️ Deleted RMS email ID: {email_id}")
 
 def get_row_documents(contract_id):
-    conn = get_conn()
-    try:
-        c = conn.cursor()
-        c.execute('''
-            SELECT id, doc_number, file_name, file_type, file_size, uploaded_by, uploaded_at
-            FROM row_documents WHERE contract_id = ? ORDER BY doc_number ASC
-        ''', (contract_id,))
-        rows = c.fetchall()
-    finally:
-        conn.close()
-    return pd.DataFrame(rows, columns=['id', 'Doc #', 'File Name', 'Type', 'Size (Bytes)', 'Uploaded By', 'Uploaded At'])
+    conn = get_connection()
+    query = """
+        SELECT id, doc_number as [Doc #], file_name as [File Name], 
+               uploaded_by as [Uploaded By], uploaded_at as [Uploaded At]
+        FROM row_documents 
+        WHERE contract_id = ? 
+        ORDER BY doc_number ASC
+    """
+    df = pd.read_sql_query(query, conn, params=(contract_id,))
+    conn.close()
+    return df
 
-def delete_row_document(doc_id, user_name="Admin"):
-    conn = get_conn()
-    try:
-        c = conn.cursor()
-        c.execute("SELECT contract_id, doc_number, file_name FROM row_documents WHERE id = ?", (doc_id,))
-        res = c.fetchone()
-        if res:
-            contract_id, doc_num, fname = res
-            c.execute("DELETE FROM row_documents WHERE id = ?", (doc_id,))
-            
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            c.execute('''
-                INSERT INTO row_logs (contract_id, user_name, field_changed, old_value, new_value, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (contract_id, user_name, "Document Deleted", f"Doc #{doc_num}: {fname}", "-", timestamp))
+def save_row_documents(contract_id, uploaded_files, uploader_name="Procurement Officer"):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COALESCE(MAX(doc_number), 0) FROM row_documents WHERE contract_id = ?", (contract_id,))
+    current_max_doc = cursor.fetchone()[0]
+    
+    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    uploaded_count = 0
 
-            log_action_cursor(c, f"🗑️ Doc #{doc_num} ('{fname}') deleted for Item #{contract_id} by {user_name}")
-            conn.commit()
-    finally:
-        conn.close()
+    for file in uploaded_files:
+        current_max_doc += 1
+        file_bytes = file.read()
+        cursor.execute("""
+            INSERT INTO row_documents (contract_id, doc_number, file_name, file_type, file_data, uploaded_by, uploaded_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (contract_id, current_max_doc, file.name, file.type, file_bytes, uploader_name, now_str))
+        
+        cursor.execute("""
+            INSERT INTO row_change_trail (contract_id, field_name, old_value, new_value, updated_by, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (contract_id, "Document Uploaded", "-", f"Doc #{current_max_doc}: {file.name}", uploader_name, now_str))
+        
+        uploaded_count += 1
+
+    conn.commit()
+    conn.close()
+    log_action(f"📁 Attached {uploaded_count} file(s) to Item #{contract_id}", uploader_name)
+    return uploaded_count
 
 def get_document_blob(doc_id):
-    conn = get_conn()
-    try:
-        c = conn.cursor()
-        c.execute("SELECT file_name, file_type, file_data FROM row_documents WHERE id = ?", (doc_id,))
-        res = c.fetchone()
-    finally:
-        conn.close()
-    return res if res else (None, None, None)
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT file_name, file_type, file_data FROM row_documents WHERE id = ?", (doc_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return row[0], row[1], row[2]
+    return None, None, None
+
+def delete_row_document(doc_id, user_name="Procurement Officer"):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT contract_id, doc_number, file_name FROM row_documents WHERE id = ?", (doc_id,))
+    row = cursor.fetchone()
+    if row:
+        contract_id, doc_num, fname = row[0], row[1], row[2]
+        cursor.execute("DELETE FROM row_documents WHERE id = ?", (doc_id,))
+        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        cursor.execute("""
+            INSERT INTO row_change_trail (contract_id, field_name, old_value, new_value, updated_by, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (contract_id, "Document Deleted", f"Doc #{doc_num}: {fname}", "Deleted", user_name, now_str))
+        conn.commit()
+        log_action(f"🗑️ Deleted Doc #{doc_num} ({fname}) from Item #{contract_id}", user_name)
+    conn.close()
 
 def get_row_change_trail(contract_id):
-    conn = get_conn()
-    try:
-        c = conn.cursor()
-        c.execute('''
-            SELECT user_name, field_changed, old_value, new_value, timestamp
-            FROM row_logs WHERE contract_id = ? ORDER BY id DESC
-        ''', (contract_id,))
-        rows = c.fetchall()
-    finally:
-        conn.close()
-    return pd.DataFrame(rows, columns=['Changed By', 'Field Modified', 'Previous Value', 'New Value', 'Timestamp'])
+    conn = get_connection()
+    query = """
+        SELECT field_name as [Field Changed], old_value as [Old Value], 
+               new_value as [New Value], updated_by as [Updated By], updated_at as [Date & Time]
+        FROM row_change_trail 
+        WHERE contract_id = ? 
+        ORDER BY id DESC
+    """
+    df = pd.read_sql_query(query, conn, params=(contract_id,))
+    conn.close()
+    return df
 
-def log_action(message):
-    conn = get_conn()
-    try:
-        c = conn.cursor()
-        log_action_cursor(c, message)
-        conn.commit()
-    finally:
-        conn.close()
+def log_action(action_desc, user_name=None):
+    conn = get_connection()
+    cursor = conn.cursor()
+    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    full_desc = f"{action_desc} (By: {user_name})" if user_name else action_desc
+    cursor.execute("INSERT INTO global_logs (action, timestamp) VALUES (?, ?)", (full_desc, now_str))
+    conn.commit()
+    conn.close()
 
 def get_global_logs():
-    conn = get_conn()
+    conn = get_connection()
+    df = pd.read_sql_query("SELECT id as [Log ID], action as [Action Description], timestamp as [Timestamp] FROM global_logs ORDER BY id DESC LIMIT 500", conn)
+    conn.close()
+    return df
+
+def import_excel_master(file_obj):
     try:
-        c = conn.cursor()
-        c.execute("SELECT timestamp, message FROM logs ORDER BY id DESC LIMIT 150")
-        rows = c.fetchall()
-    finally:
+        excel_file = pd.ExcelFile(file_obj)
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("DELETE FROM contracts;")
+        cursor.execute("DELETE FROM sqlite_sequence WHERE name='contracts';")
+        conn.commit()
+
+        imported_total = 0
+        target_sheets = ['Medicines', 'Consumables', 'Laboratory', 'IMPLANTS_']
+        valid_sheets = [s for s in excel_file.sheet_names if any(ts.lower() in s.lower() for ts in target_sheets)]
+        sheets_to_process = valid_sheets if valid_sheets else excel_file.sheet_names
+
+        for sheet in sheets_to_process:
+            sdf = pd.read_excel(file_obj, sheet_name=sheet)
+            sdf.columns = [str(c).strip() for c in sdf.columns]
+
+            for col in sdf.columns:
+                if re.match(r'(?i)^product\s*description$|^description$|^item\s*description$', str(col)):
+                    sdf.rename(columns={col: 'Product Description'}, inplace=True)
+                    break
+
+            sdf = sdf.replace(r'^\s*$', pd.NA, regex=True).dropna(how='all')
+
+            sdf['Category'] = sheet
+
+            cols_in_db = [
+                'Product code', 'Product Description', 'Unit price', 'Currency',
+                'pack size', 'Incoterm', 'Supplier', 'Manufacturer and country of origin',
+                'Starting date for contract execution (contact signature)',
+                'Validity Period (Years)', 'Contract End Date (Expiry)',
+                'Contract Execution Year', 'Delivey period',
+                'Ref/N° of Framework Agreement', 'Title of the contract',
+                "Manufacturer's addresses", 'Category', 'PROCUREMENT OFFICER',
+                'CLEANING ACTION'
+            ]
+
+            insert_cols = [c for c in cols_in_db if c in sdf.columns]
+            if insert_cols:
+                sub_df = sdf[insert_cols].copy()
+                sub_df.to_sql('contracts', conn, if_exists='append', index=False)
+                imported_total += len(sub_df)
+
+        conn.commit()
         conn.close()
-    return pd.DataFrame(rows, columns=['Timestamp', 'Action / Event Log'])
+        log_action(f"📂 Imported {imported_total} contract rows across {len(sheets_to_process)} sheet(s)")
+        return True, imported_total
+    except Exception as e:
+        return False, str(e)
